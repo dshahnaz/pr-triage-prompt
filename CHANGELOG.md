@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here. Format loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-04-18
+
+### Added
+- **Agent-instructions block** (`docs/agent-instructions.md`) — a fenced markdown file whose `>>>>> BEGIN AGENT INSTRUCTIONS >>>>>` / `<<<<< END AGENT INSTRUCTIONS <<<<<` section you paste into the PAIS agent's System Instructions field. Once installed, the agent knows the KB structure, retrieval strategy, output format, and rules — and per-prompt footers can shrink.
+- **`pr-triage batch` now writes `agent-instructions.md` into `--out-dir`** by default, so the file lives next to the prompts. Opt-out with `--no-agent-instructions`.
+- **`--footer full|short`** on `build` + `batch`. `full` (default) emits the self-contained 180-token footer. `short` emits a ~15-token footer that assumes the agent instructions are installed. On a 10-PR batch, `short` saves ~1.8 K tokens per run.
+- **`prompt_footer = "short"`** in `~/.pr-triage/config.toml` — persistent default.
+- **Footers are wrapped in HTML-comment fences**:
+  ```
+  <!-- ===== pr-triage-prompt BEGIN task footer (full|short) ===== -->
+  …
+  <!-- ===== pr-triage-prompt END task footer ===== -->
+  ```
+  So downstream tooling can strip the footer in one regex.
+
+### Migration
+- Existing golden (`examples/prompt_23861.md`) regenerated with the fenced footer. No other layout changes.
+- If you've already pasted the (pre-0.7.0) footer as a system prompt somewhere, replace it with the block from `docs/agent-instructions.md`.
+
 ## [0.6.0] — 2026-04-18
 
 ### Changed (performance)
@@ -94,6 +113,7 @@ Initial release.
 - SDK: `build_prompt(pr, jira, *, repo_cache_dir, token_budget) -> PromptBundle`.
 - Golden test against `examples/pr_23861.json` → `examples/prompt_23861.md` (byte-exact).
 
+[0.7.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.7.0
 [0.6.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.6.0
 [0.5.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.5.0
 [0.4.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.4.0

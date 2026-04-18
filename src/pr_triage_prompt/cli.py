@@ -10,6 +10,7 @@ from pathlib import Path
 import typer
 
 from pr_triage_prompt import __version__, log
+from pr_triage_prompt.agent_instructions import write_agent_instructions
 from pr_triage_prompt.checkout import clear_cache, ensure_checkout, list_cache
 from pr_triage_prompt.config import Config, load_config
 from pr_triage_prompt.io.batch import discover_context
@@ -41,6 +42,11 @@ class EmitMode(str, Enum):
 class ReportPaths(str, Enum):
     rel = "rel"
     abs = "abs"
+
+
+class FooterVariant(str, Enum):
+    full = "full"
+    short = "short"
 
 
 def _apply_log_flags(quiet: bool, verbose: bool, no_color: bool) -> None:
@@ -178,12 +184,18 @@ def build(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print git commands + per-file analyzer timings."),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output."),
+    footer: FooterVariant | None = typer.Option(
+        None, "--footer",
+        help="Task footer variant. `full` is self-contained; `short` assumes agent "
+        "instructions from docs/agent-instructions.md are installed (saves ~165 tokens).",
+    ),
 ) -> None:
     """Build a Markdown prompt from a PR (+ Jira ticket)."""
     _apply_log_flags(quiet=False, verbose=verbose, no_color=no_color)
     cfg = load_config()
     if clone_url:
         cfg.clone_url_template = clone_url
+    footer_variant = footer.value if footer is not None else cfg.prompt_footer
     if cfg.clone_url_template is None:
         log.note(
             "no clone_url_template set in ~/.pr-triage/config.toml; sparse checkouts are skipped "
@@ -196,7 +208,8 @@ def build(
 
     budget = token_budget or cfg.default_token_budget
     bundle = build_prompt(
-        pr, jira, repo_root=repo_root, token_budget=budget, strict_budget=strict_budget,
+        pr, jira, repo_root=repo_root, token_budget=budget,
+        strict_budget=strict_budget, footer=footer_variant,
     )
 
     if fmt is OutputFormat.md:
@@ -260,6 +273,15 @@ def batch(
         ReportPaths.rel, "--report-paths",
         help="Show paths in the report as rel (relative to --out-dir) or abs.",
     ),
+    footer: FooterVariant | None = typer.Option(
+        None, "--footer",
+        help="Task footer variant. `full` is self-contained; `short` assumes agent "
+        "instructions from docs/agent-instructions.md are installed (saves ~165 tokens).",
+    ),
+    no_agent_instructions: bool = typer.Option(
+        False, "--no-agent-instructions",
+        help="Do not write agent-instructions.md into --out-dir.",
+    ),
 ) -> None:
     """Build prompts from every pr_*.json in a context folder.
 
@@ -270,6 +292,7 @@ def batch(
     cfg = load_config()
     if clone_url:
         cfg.clone_url_template = clone_url
+    footer_variant = footer.value if footer is not None else cfg.prompt_footer
     items = discover_context(context_dir)
     if not items:
         log.error(f"no pr_*.json files in {context_dir}")
@@ -277,6 +300,11 @@ def batch(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     budget = token_budget or cfg.default_token_budget
+
+    if not no_agent_instructions:
+        instructions_path = out_dir / "agent-instructions.md"
+        write_agent_instructions(instructions_path)
+        log.info(f"wrote {instructions_path.name} — paste into your PAIS agent's System Instructions")
 
     log.info(
         f"pr-triage {__version__}  ·  {len(items)} PR{'s' if len(items) != 1 else ''} "
@@ -318,6 +346,7 @@ def batch(
         bundle = build_prompt(
             item.pr, item.jira,
             repo_root=repo_root, token_budget=budget, strict_budget=strict_budget,
+            footer=footer_variant,
         )
         batch_items.append(BatchItem(pr=item.pr, jira=item.jira, repo_root=repo_root))
 
@@ -362,6 +391,7 @@ def batch(
             token_budget=combined_budget,
             per_pr_token_budget=budget,
             strict_budget=strict_budget,
+            footer=footer_variant,
         )
         if fmt is OutputFormat.md:
             combined_path = out_dir / combined_name

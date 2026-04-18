@@ -76,7 +76,7 @@ pr-triage batch ./context --out-dir ./out
 
 For each `pr_*.json` this looks up the matching Jira — first by filename convention (`jira_<jira_id>.json`), then by scanning every `jira_*.json` for a top-level `"key"` that matches. You get one `prompt_<N>.md` per PR **and** one combined `prompt.md` with a single agent-task footer.
 
-Useful flags: `--emit per-pr|combined|both` (default `both`), `--combined-name all.md`, `--token-budget 4000` (per-PR), `--combined-budget 16000`, `--checkout` (sparse-clone each PR to get accurate module names; off by default in batch mode), `--quiet`/`-q` (skip per-PR progress lines), `--strict-budget` (drop overflowing modules/PRs instead of emitting them — see "Token budget" below).
+Useful flags: `--emit per-pr|combined|both` (default `both`), `--combined-name all.md`, `--token-budget 4000` (per-PR), `--combined-budget 16000`, `--quiet`/`-q` (skip per-PR progress lines), `--strict-budget` (drop overflowing modules/PRs instead of emitting them — see "Token budget" below), `--footer full|short` (see "PAIS agent setup" below), `--no-agent-instructions` (suppress the `agent-instructions.md` sidecar).
 
 After the emit loop, `batch` prints a report — one row per written file:
 
@@ -90,6 +90,35 @@ Report:
 ```
 
 `Over?` is flagged when `tokens > budget`. In `--format json` mode, the same rows land in `out/<combined-name-stem>.report.json` as a list for scripting.
+
+## PAIS agent setup (short-footer optimization)
+
+`pr-triage batch` writes [`agent-instructions.md`](docs/agent-instructions.md)
+into `--out-dir` automatically. That file contains a fenced block that you
+copy into the PAIS agent's **System Instructions** field — one-time setup.
+Once installed, the agent already knows the KB structure, retrieval strategy,
+and expected output format, so the footer on every generated prompt can be
+reduced from ~180 tokens to ~15 tokens:
+
+```bash
+# After pasting docs/agent-instructions.md into the PAIS agent:
+pr-triage batch ./context --out-dir ./out --footer short
+```
+
+Or persist the default in `~/.pr-triage/config.toml`:
+
+```toml
+prompt_footer = "short"
+```
+
+Every footer is wrapped in HTML-comment fences so it can be stripped by
+downstream tooling:
+
+```
+<!-- ===== pr-triage-prompt BEGIN task footer (full|short) ===== -->
+…
+<!-- ===== pr-triage-prompt END task footer ===== -->
+```
 
 ## Token budget
 

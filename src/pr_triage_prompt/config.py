@@ -32,6 +32,10 @@ class Config:
     git_token_env: str | None = None
     """Env var to read for HTTPS-clone authentication against non-github.com hosts.
     For github.com, ``github_token_env`` is used automatically."""
+    prompt_footer: str = "full"
+    """Default task-footer variant in generated prompts. One of ``full`` or ``short``.
+    ``short`` assumes the agent-instructions block from ``docs/agent-instructions.md``
+    has been installed on the PAIS agent; it saves ~165 tokens per prompt."""
 
     def resolved_clone_url(self, repo: str) -> str | None:
         if not self.clone_url_template:
@@ -91,6 +95,8 @@ def load_config(path: Path | None = None) -> Config:
         cfg.clone_url_template = data["clone_url_template"]
     if isinstance(data.get("git_token_env"), str):
         cfg.git_token_env = data["git_token_env"]
+    if isinstance(data.get("prompt_footer"), str) and data["prompt_footer"] in ("full", "short"):
+        cfg.prompt_footer = data["prompt_footer"]
     return cfg
 
 

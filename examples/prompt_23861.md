@@ -92,6 +92,8 @@ https://uts-logs.lvn.broadcom.net/user-logs/mops-test/5672326/5fb0544e-6699-42eb
 
 - `ops/tests/dev/VCFPasswordManagement/src/main/resources/VCFPasswordManagement-testng.xml` (modified, +8/-0)
 
+<!-- ===== pr-triage-prompt BEGIN task footer (full) ===== -->
+
 ## Task for the agent
 
 You have access to a knowledge base of test-suite documents. Each document has a top-level suite name, a `## Components` section, and a `## Test Coverage` section with per-case entries under `### testXxx` headers describing **Purpose**, **Key Operations**, and **API Endpoints**.
@@ -106,3 +108,5 @@ Rules:
 - Do not invent test names. If nothing in the KB is relevant, reply exactly `none`.
 - Prefer coverage: include every case that plausibly exercises any changed class or operation — do not stop at the single best match.
 - Do not include setup/fixture cases unless they directly exercise the change.
+
+<!-- ===== pr-triage-prompt END task footer ===== -->

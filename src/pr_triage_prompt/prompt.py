@@ -18,7 +18,11 @@ from pr_triage_prompt.modules import resolve_module
 
 SCHEMA_MARKER = "<!-- pr-triage-prompt schema v2 -->"
 
-AGENT_TASK_FOOTER = (
+FOOTER_BEGIN_FULL = "<!-- ===== pr-triage-prompt BEGIN task footer (full) ===== -->"
+FOOTER_BEGIN_SHORT = "<!-- ===== pr-triage-prompt BEGIN task footer (short) ===== -->"
+FOOTER_END = "<!-- ===== pr-triage-prompt END task footer ===== -->"
+
+_FOOTER_FULL_BODY = (
     "## Task for the agent\n"
     "\n"
     "You have access to a knowledge base of test-suite documents. Each document has a "
@@ -43,6 +47,22 @@ AGENT_TASK_FOOTER = (
     "or operation — do not stop at the single best match.\n"
     "- Do not include setup/fixture cases unless they directly exercise the change.\n"
 )
+
+_FOOTER_SHORT_BODY = (
+    "## Task\n"
+    "\n"
+    "List the test cases from the KB that most plausibly exercise the changes above.\n"
+)
+
+AGENT_TASK_FOOTER = f"{FOOTER_BEGIN_FULL}\n\n{_FOOTER_FULL_BODY}\n{FOOTER_END}\n"
+AGENT_TASK_FOOTER_SHORT = f"{FOOTER_BEGIN_SHORT}\n\n{_FOOTER_SHORT_BODY}\n{FOOTER_END}\n"
+
+
+def get_footer(variant: str) -> str:
+    """Return the agent-task footer body. `variant` in {"full", "short"}."""
+    if variant == "short":
+        return AGENT_TASK_FOOTER_SHORT
+    return AGENT_TASK_FOOTER
 
 _SECTION_BOUNDARY = re.compile(r"(?m)^\s*##\s+\S")
 
@@ -349,18 +369,21 @@ def build_prompt(
     repo_root: Path | None = None,
     token_budget: int = 4000,
     strict_budget: bool = False,
+    footer: str = "full",
 ) -> PromptBundle:
     """Build the Markdown prompt + structured bundle.
 
     By default nothing is trimmed — `token_budget` is reported as an informational
     target. Pass `strict_budget=True` to drop overflowing modules into a one-line
-    summary (the historic behavior).
+    summary (the historic behavior). ``footer="short"`` emits a minimal task footer
+    that relies on agent-side instructions — see ``docs/agent-instructions.md``.
     """
     file_summaries = _analyze_files(pr, repo_root)
     modules = _group_files_by_module(file_summaries)
 
     count = _token_counter()
-    footer_tokens = count(AGENT_TASK_FOOTER)
+    footer_text = get_footer(footer)
+    footer_tokens = count(footer_text)
     body_md, dropped = _render_pr_body(
         pr, jira, modules, file_summaries,
         token_budget=token_budget - footer_tokens,
@@ -368,7 +391,7 @@ def build_prompt(
         strict_budget=strict_budget,
     )
 
-    markdown = body_md + "\n" + AGENT_TASK_FOOTER.rstrip() + "\n"
+    markdown = body_md + "\n" + footer_text.rstrip() + "\n"
     token_count = count(markdown)
 
     return PromptBundle(
@@ -396,6 +419,7 @@ def build_combined_prompt(
     token_budget: int = 16000,
     per_pr_token_budget: int = 4000,
     strict_budget: bool = False,
+    footer: str = "full",
 ) -> PromptBundle:
     """Build one combined prompt covering many PRs with a single agent-task footer.
 
@@ -405,7 +429,8 @@ def build_combined_prompt(
     collapsed to a one-line "N additional PRs omitted" notice.
     """
     count = _token_counter()
-    footer_tokens = count(AGENT_TASK_FOOTER)
+    footer_text = get_footer(footer)
+    footer_tokens = count(footer_text)
     header_parts = [
         SCHEMA_MARKER,
         "",
@@ -474,7 +499,7 @@ def build_combined_prompt(
     if omitted_line:
         parts.append(omitted_line.rstrip())
         parts.append("")
-    parts.append(AGENT_TASK_FOOTER.rstrip())
+    parts.append(footer_text.rstrip())
     parts.append("")
 
     markdown = "\n".join(parts)
