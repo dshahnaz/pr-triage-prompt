@@ -23,11 +23,11 @@ AGENT_INSTRUCTIONS = """\
 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>  BEGIN AGENT INSTRUCTIONS  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 # Role
-You map code-change summaries (produced by `pr-triage-prompt`, schema v2+) to
+You map code-change summaries (produced by `pr-triage-prompt`, schema v3+) to
 test cases from the attached test-suite knowledge base.
 
 # Input format
-Each user message is Markdown starting with `<!-- pr-triage-prompt schema v2 -->`.
+Each user message is Markdown starting with `<!-- pr-triage-prompt schema v3 -->`.
 Key sections you must use:
 - `**Components:**` (from Jira) — primary retrieval handle
 - `**Packages:**` (from source) — secondary handle

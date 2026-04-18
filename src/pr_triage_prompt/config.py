@@ -36,6 +36,11 @@ class Config:
     """Default task-footer variant in generated prompts. One of ``full`` or ``short``.
     ``short`` assumes the agent-instructions block from ``docs/agent-instructions.md``
     has been installed on the PAIS agent; it saves ~165 tokens per prompt."""
+    prompt_detail: str = "compact"
+    """Default body-detail level. One of ``minimal`` / ``compact`` / ``full``.
+    ``minimal`` drops PR description, Jira, summary table, and excerpts — only file
+    paths, classes, and functions remain. ``compact`` adds a one-line Jira summary.
+    ``full`` emits every section (old v2 shape)."""
 
     def resolved_clone_url(self, repo: str) -> str | None:
         if not self.clone_url_template:
@@ -97,6 +102,10 @@ def load_config(path: Path | None = None) -> Config:
         cfg.git_token_env = data["git_token_env"]
     if isinstance(data.get("prompt_footer"), str) and data["prompt_footer"] in ("full", "short"):
         cfg.prompt_footer = data["prompt_footer"]
+    if isinstance(data.get("prompt_detail"), str) and data["prompt_detail"] in (
+        "minimal", "compact", "full"
+    ):
+        cfg.prompt_detail = data["prompt_detail"]
     return cfg
 
 

@@ -60,9 +60,10 @@ def test_batch_emits_per_pr_and_combined(tmp_path: Path) -> None:
     assert (out / "prompt.md").is_file()
 
     combined = (out / "prompt.md").read_text(encoding="utf-8")
-    assert combined.count("<!-- pr-triage-prompt schema v2 -->") == 1
+    assert combined.count("<!-- pr-triage-prompt schema v3 -->") == 1
     assert combined.count("## Task for the agent") == 1
-    assert "# Batch prompt — 2 PRs" in combined
+    assert "# Batch — 2 changed files across 2 PRs" in combined
+    # Jira summaries land in the header in compact mode (default).
     assert "First" in combined
     assert "Second" in combined
 

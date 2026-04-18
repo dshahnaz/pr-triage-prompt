@@ -48,10 +48,12 @@ def test_retrieval_keys_section_lists_all_buckets() -> None:
     assert "- Operations: Probe.ping" in md
 
 
-def test_per_file_package_line() -> None:
+def test_per_file_package_line_only_in_full_detail() -> None:
     pr = _pr_java()
-    md = build_prompt(pr).markdown
-    assert "    - Package: `com.example.net`" in md
+    md_compact = build_prompt(pr).markdown
+    md_full = build_prompt(pr, detail="full").markdown
+    assert "    - Package: `com.example.net`" not in md_compact
+    assert "    - Package: `com.example.net`" in md_full
 
 
 def test_no_retrieval_section_when_nothing_to_show() -> None:

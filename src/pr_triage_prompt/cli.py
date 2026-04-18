@@ -12,6 +12,7 @@ import typer
 from pr_triage_prompt import __version__, log
 from pr_triage_prompt.agent_instructions import write_agent_instructions
 from pr_triage_prompt.checkout import clear_cache, ensure_checkout, list_cache
+from pr_triage_prompt.chunk import split_combined
 from pr_triage_prompt.config import Config, load_config
 from pr_triage_prompt.io.batch import discover_context
 from pr_triage_prompt.io.jira import fetch_jira_live, load_jira_file
@@ -47,6 +48,12 @@ class ReportPaths(str, Enum):
 class FooterVariant(str, Enum):
     full = "full"
     short = "short"
+
+
+class DetailLevel(str, Enum):
+    minimal = "minimal"
+    compact = "compact"
+    full = "full"
 
 
 def _apply_log_flags(quiet: bool, verbose: bool, no_color: bool) -> None:
@@ -189,6 +196,11 @@ def build(
         help="Task footer variant. `full` is self-contained; `short` assumes agent "
         "instructions from docs/agent-instructions.md are installed (saves ~165 tokens).",
     ),
+    detail: DetailLevel | None = typer.Option(
+        None, "--detail",
+        help="Body-detail level. `minimal` (files+classes+functions only), "
+        "`compact` (+ one-line Jira summary), `full` (every section).",
+    ),
 ) -> None:
     """Build a Markdown prompt from a PR (+ Jira ticket)."""
     _apply_log_flags(quiet=False, verbose=verbose, no_color=no_color)
@@ -196,6 +208,7 @@ def build(
     if clone_url:
         cfg.clone_url_template = clone_url
     footer_variant = footer.value if footer is not None else cfg.prompt_footer
+    detail_level = detail.value if detail is not None else cfg.prompt_detail
     if cfg.clone_url_template is None:
         log.note(
             "no clone_url_template set in ~/.pr-triage/config.toml; sparse checkouts are skipped "
@@ -209,7 +222,7 @@ def build(
     budget = token_budget or cfg.default_token_budget
     bundle = build_prompt(
         pr, jira, repo_root=repo_root, token_budget=budget,
-        strict_budget=strict_budget, footer=footer_variant,
+        strict_budget=strict_budget, footer=footer_variant, detail=detail_level,
     )
 
     if fmt is OutputFormat.md:
@@ -278,6 +291,16 @@ def batch(
         help="Task footer variant. `full` is self-contained; `short` assumes agent "
         "instructions from docs/agent-instructions.md are installed (saves ~165 tokens).",
     ),
+    detail: DetailLevel | None = typer.Option(
+        None, "--detail",
+        help="Body-detail level. `minimal` (files+classes+functions only), "
+        "`compact` (+ one-line Jira summary), `full` (every section).",
+    ),
+    chunk_kb: int = typer.Option(
+        0, "--chunk-kb",
+        help="Split the combined prompt into multiple files ≤ N KiB each "
+        "(e.g. 5). 0 disables chunking.",
+    ),
     no_agent_instructions: bool = typer.Option(
         False, "--no-agent-instructions",
         help="Do not write agent-instructions.md into --out-dir.",
@@ -293,6 +316,7 @@ def batch(
     if clone_url:
         cfg.clone_url_template = clone_url
     footer_variant = footer.value if footer is not None else cfg.prompt_footer
+    detail_level = detail.value if detail is not None else cfg.prompt_detail
     items = discover_context(context_dir)
     if not items:
         log.error(f"no pr_*.json files in {context_dir}")
@@ -346,7 +370,7 @@ def batch(
         bundle = build_prompt(
             item.pr, item.jira,
             repo_root=repo_root, token_budget=budget, strict_budget=strict_budget,
-            footer=footer_variant,
+            footer=footer_variant, detail=detail_level,
         )
         batch_items.append(BatchItem(pr=item.pr, jira=item.jira, repo_root=repo_root))
 
@@ -392,34 +416,57 @@ def batch(
             per_pr_token_budget=budget,
             strict_budget=strict_budget,
             footer=footer_variant,
+            detail=detail_level,
         )
-        if fmt is OutputFormat.md:
-            combined_path = out_dir / combined_name
-            combined_path.write_text(combined.markdown, encoding="utf-8")
+        if chunk_kb and chunk_kb > 0 and fmt is OutputFormat.md:
+            chunks = split_combined(combined.markdown, max_bytes=chunk_kb * 1024)
+            stem = Path(combined_name).stem
+            digits = max(2, len(str(len(chunks))))
+            for ch in chunks:
+                part_path = out_dir / f"{stem}_part_{ch.index:0{digits}d}.md"
+                part_path.write_text(ch.markdown, encoding="utf-8")
+                log.progress(
+                    f"combined: {part_path.name}  —  {ch.size_bytes:,} bytes "
+                    f"(part {ch.index}/{ch.total})"
+                )
+                report_rows.append({
+                    "file": str(part_path),
+                    "kind": f"part {ch.index}/{ch.total}",
+                    "tokens": ch.size_bytes,  # in chunked mode the metric is bytes
+                    "budget": chunk_kb * 1024,
+                    "modules": "",
+                    "files": "",
+                    "jira": f"{matched_with_content}/{len(items)} matched",
+                    "checkout": "",
+                    "over": ch.size_bytes > chunk_kb * 1024,
+                    "pr_number": None,
+                })
         else:
-            combined_path = out_dir / (Path(combined_name).stem + ".json")
-            combined_path.write_text(
-                json.dumps(combined.json_payload, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
+            if fmt is OutputFormat.md:
+                combined_path = out_dir / combined_name
+                combined_path.write_text(combined.markdown, encoding="utf-8")
+            else:
+                combined_path = out_dir / (Path(combined_name).stem + ".json")
+                combined_path.write_text(
+                    json.dumps(combined.json_payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            log.progress(
+                f"combined: {combined_path.name}  —  {combined.token_count} tokens / "
+                f"budget {combined.token_budget}"
             )
-        dropped_prs = sum(1 for m in combined.dropped_modules if m.startswith("PR #"))
-        log.progress(
-            f"combined: {combined_path.name}  —  {combined.token_count} tokens / "
-            f"budget {combined.token_budget}"
-            + (f" · {dropped_prs} PRs dropped" if dropped_prs else "")
-        )
-        report_rows.append({
-            "file": str(combined_path),
-            "kind": "combined",
-            "tokens": combined.token_count,
-            "budget": combined.token_budget,
-            "modules": len(combined.modules),
-            "files": sum(len(it.pr.files) for it in items),
-            "jira": f"{matched_with_content}/{len(items)} matched",
-            "checkout": "",
-            "over": combined.token_count > combined.token_budget,
-            "pr_number": None,
-        })
+            report_rows.append({
+                "file": str(combined_path),
+                "kind": "combined",
+                "tokens": combined.token_count,
+                "budget": combined.token_budget,
+                "modules": len(combined.modules),
+                "files": sum(len(it.pr.files) for it in items),
+                "jira": f"{matched_with_content}/{len(items)} matched",
+                "checkout": "",
+                "over": combined.token_count > combined.token_budget,
+                "pr_number": None,
+            })
 
     _print_report(report_rows, out_dir=out_dir, relative=(report_paths is ReportPaths.rel))
 

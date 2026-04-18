@@ -16,7 +16,9 @@ from pr_triage_prompt.models import (
 )
 from pr_triage_prompt.modules import resolve_module
 
-SCHEMA_MARKER = "<!-- pr-triage-prompt schema v2 -->"
+SCHEMA_MARKER = "<!-- pr-triage-prompt schema v3 -->"
+
+DETAIL_LEVELS = ("minimal", "compact", "full")
 
 FOOTER_BEGIN_FULL = "<!-- ===== pr-triage-prompt BEGIN task footer (full) ===== -->"
 FOOTER_BEGIN_SHORT = "<!-- ===== pr-triage-prompt BEGIN task footer (short) ===== -->"
@@ -119,6 +121,8 @@ def _format_header(
     pr: PullRequest,
     jira: JiraTicket | None,
     file_summaries: list[FileChangeSummary],
+    *,
+    detail: str = "compact",
 ) -> list[str]:
     jira_id = pr.jira_id or "—"
     lines = [
@@ -126,7 +130,8 @@ def _format_header(
         "",
         f"# PR #{pr.number} — {pr.title}",
         "",
-        f"**Repo:** {pr.repo}   **SHA:** {pr.sha}   **Jira:** {jira_id}",
+        f"**Repo:** {pr.repo}  **SHA:** {pr.sha[:12] if detail != 'full' else pr.sha}  "
+        f"**Jira:** {jira_id}",
     ]
     components = jira.components if (jira and jira.components) else []
     if components:
@@ -134,6 +139,8 @@ def _format_header(
     packages = sorted({f.package for f in file_summaries if f.package})
     if packages:
         lines.append(f"**Packages:** {', '.join(packages)}")
+    if detail == "compact" and jira and jira.summary:
+        lines.append(f"**Jira summary:** {jira.summary}")
     lines.append("")
     return lines
 
@@ -191,23 +198,38 @@ def _format_summary_table(modules: list[ModuleSummary]) -> list[str]:
     return lines
 
 
-def _format_module_section(module: ModuleSummary) -> list[str]:
+def _shorten_path(p: str, max_chars: int = 55) -> str:
+    if len(p) <= max_chars:
+        return p
+    parts = p.split("/")
+    if len(parts) <= 3:
+        return p
+    return "…/" + "/".join(parts[-3:])
+
+
+def _format_module_section(module: ModuleSummary, *, detail: str = "compact") -> list[str]:
     header = f"### {module.module_name}"
+    # In compact/minimal, drop the parenthetical path when the module name already matches
+    # the last path segment; otherwise show a shortened path.
     if module.module_path:
-        header += f" (`{module.module_path}`)"
+        last_seg = module.module_path.rstrip("/").split("/")[-1]
+        if detail == "full" or module.module_name != last_seg:
+            header += f" (`{_shorten_path(module.module_path)}`)"
     lines: list[str] = [header, ""]
     for f in module.files:
         delta = f"+{f.additions}/-{f.deletions}"
-        lines.append(f"- `{f.path}` ({f.status}, {delta})")
-        if f.package:
+        path_display = _shorten_path(f.path) if detail != "full" else f.path
+        lines.append(f"- `{path_display}` ({f.status}, {delta})")
+        if detail == "full" and f.package:
             lines.append(f"    - Package: `{f.package}`")
         if f.classes_changed:
             lines.append(f"    - Classes: {', '.join(f'`{c}`' for c in f.classes_changed)}")
         if f.functions_changed:
+            label = "Functions/methods" if detail == "full" else "Functions"
             lines.append(
-                f"    - Functions/methods: {', '.join(f'`{fn}`' for fn in f.functions_changed)}"
+                f"    - {label}: {', '.join(f'`{fn}`' for fn in f.functions_changed)}"
             )
-        if f.excerpt:
+        if detail == "full" and f.excerpt:
             lines.append("    - Excerpt:")
             for row in f.excerpt.splitlines():
                 lines.append(f"      `{row.rstrip()}`")
@@ -316,23 +338,27 @@ def _render_pr_body(
     count,
     include_header_marker: bool = True,
     strict_budget: bool = False,
+    detail: str = "compact",
 ) -> tuple[str, list[ModuleSummary]]:
     """Render one PR's markdown block (no agent-task footer).
 
     If `include_header_marker` is False, the leading schema marker is omitted — the caller
     is expected to supply it once at the top of the document. When `strict_budget` is
     False (default) every module is emitted in full regardless of `token_budget`.
+    `detail` in {"minimal", "compact", "full"} controls which sections are emitted.
 
     Returns (markdown, dropped_modules).
     """
     head: list[str] = []
-    for line in _format_header(pr, jira, file_summaries):
+    for line in _format_header(pr, jira, file_summaries, detail=detail):
         if line == SCHEMA_MARKER and not include_header_marker:
             continue
         head.append(line)
-    head.extend(_format_jira_block(jira))
-    head.extend(_format_pr_body(pr))
-    head.extend(_format_summary_table(modules))
+    if detail == "full":
+        head.extend(_format_jira_block(jira))
+        head.extend(_format_pr_body(pr))
+        head.extend(_format_summary_table(modules))
+    # Retrieval keys: always emitted (the core signal for the KB).
     head.extend(_format_retrieval_keys(jira, file_summaries))
 
     head_text = "\n".join(head)
@@ -343,7 +369,7 @@ def _render_pr_body(
         head_tokens = count(head_text)
         remaining = token_budget - head_tokens
         for m in modules:
-            block = "\n".join(_format_module_section(m))
+            block = "\n".join(_format_module_section(m, detail=detail))
             block_tokens = count(block)
             if block_tokens <= remaining:
                 rendered_modules.append(block)
@@ -352,7 +378,7 @@ def _render_pr_body(
                 dropped.append(m)
     else:
         for m in modules:
-            rendered_modules.append("\n".join(_format_module_section(m)))
+            rendered_modules.append("\n".join(_format_module_section(m, detail=detail)))
 
     body_parts: list[str] = [head_text.rstrip(), ""]
     if rendered_modules:
@@ -370,14 +396,17 @@ def build_prompt(
     token_budget: int = 4000,
     strict_budget: bool = False,
     footer: str = "full",
+    detail: str = "compact",
 ) -> PromptBundle:
     """Build the Markdown prompt + structured bundle.
 
-    By default nothing is trimmed — `token_budget` is reported as an informational
-    target. Pass `strict_budget=True` to drop overflowing modules into a one-line
-    summary (the historic behavior). ``footer="short"`` emits a minimal task footer
-    that relies on agent-side instructions — see ``docs/agent-instructions.md``.
+    ``detail`` in {"minimal", "compact", "full"} selects which sections are emitted:
+    - minimal: header + per-module file/class/function listings + retrieval keys
+    - compact (default): minimal + a single-line `**Jira summary:**` in the header
+    - full: everything (Jira ticket block, PR description, summary table, excerpts)
     """
+    if detail not in DETAIL_LEVELS:
+        detail = "compact"
     file_summaries = _analyze_files(pr, repo_root)
     modules = _group_files_by_module(file_summaries)
 
@@ -389,6 +418,7 @@ def build_prompt(
         token_budget=token_budget - footer_tokens,
         count=count,
         strict_budget=strict_budget,
+        detail=detail,
     )
 
     markdown = body_md + "\n" + footer_text.rstrip() + "\n"
@@ -413,6 +443,32 @@ class BatchItem:
     repo_root: Path | None = None
 
 
+def _merge_file_summaries(items: list[BatchItem]) -> list[FileChangeSummary]:
+    """Flatten all files across all PRs. If the same path shows up in multiple PRs,
+    union their classes_changed / functions_changed and keep the highest additions/
+    deletions counts. PR boundaries are discarded."""
+    merged: dict[str, FileChangeSummary] = {}
+    for item in items:
+        summaries = _analyze_files(item.pr, item.repo_root)
+        for s in summaries:
+            existing = merged.get(s.path)
+            if existing is None:
+                merged[s.path] = s.model_copy(deep=True)
+                continue
+            # Merge: union class/function lists preserving order.
+            for c in s.classes_changed:
+                if c not in existing.classes_changed:
+                    existing.classes_changed.append(c)
+            for fn in s.functions_changed:
+                if fn not in existing.functions_changed:
+                    existing.functions_changed.append(fn)
+            existing.additions = max(existing.additions, s.additions)
+            existing.deletions = max(existing.deletions, s.deletions)
+            if s.package and not existing.package:
+                existing.package = s.package
+    return list(merged.values())
+
+
 def build_combined_prompt(
     items: list[BatchItem],
     *,
@@ -420,26 +476,37 @@ def build_combined_prompt(
     per_pr_token_budget: int = 4000,
     strict_budget: bool = False,
     footer: str = "full",
+    detail: str = "compact",
 ) -> PromptBundle:
-    """Build one combined prompt covering many PRs with a single agent-task footer.
+    """Build one combined prompt from ALL file changes across all PRs — flat.
 
-    By default every PR is emitted in full and the budgets are informational targets.
-    When `strict_budget=True`, each PR's module list is greedy-packed against
-    `per_pr_token_budget` and PRs that don't fit the remaining `token_budget` are
-    collapsed to a one-line "N additional PRs omitted" notice.
+    PR boundaries are intentionally discarded: the combined prompt lists every
+    changed file (deduped across PRs), grouped by module, followed by aggregated
+    retrieval keys. This is the shape the PAIS agent needs — it retrieves on
+    components/classes/operations, not on "PR #<N>".
     """
+    if detail not in DETAIL_LEVELS:
+        detail = "compact"
+
     count = _token_counter()
     footer_text = get_footer(footer)
-    footer_tokens = count(footer_text)
-    header_parts = [
+
+    # Aggregate across PRs.
+    merged_files = _merge_file_summaries(items)
+    modules = _group_files_by_module(merged_files)
+
+    # Header: batch title + repos + components + packages (+ Jira summaries in compact).
+    header_lines: list[str] = [
         SCHEMA_MARKER,
         "",
-        f"# Batch prompt — {len(items)} PR{'s' if len(items) != 1 else ''}",
+        f"# Batch — {sum(1 for _ in merged_files)} changed file"
+        f"{'s' if len(merged_files) != 1 else ''} across {len(items)} PR"
+        f"{'s' if len(items) != 1 else ''}",
         "",
     ]
     repos = sorted({it.pr.repo for it in items if it.pr.repo})
     if repos:
-        header_parts.append("**Repos:** " + ", ".join(repos))
+        header_lines.append("**Repos:** " + ", ".join(repos))
     components_in_scope: list[str] = []
     seen_c: set[str] = set()
     for it in items:
@@ -449,67 +516,49 @@ def build_combined_prompt(
                     seen_c.add(c)
                     components_in_scope.append(c)
     if components_in_scope:
-        header_parts.append("**Components in scope:** " + ", ".join(components_in_scope))
-    header_parts.append("")
-    header_md = "\n".join(header_parts)
-    header_tokens = count(header_md)
+        header_lines.append("**Components in scope:** " + ", ".join(components_in_scope))
+    packages = sorted({f.package for f in merged_files if f.package})
+    if packages:
+        header_lines.append("**Packages in scope:** " + ", ".join(packages))
+    if detail == "compact":
+        # One Jira-summary line per PR that actually has a summary, in PR order.
+        jira_lines: list[str] = []
+        for it in items:
+            if it.jira and it.jira.summary and it.pr.jira_id:
+                jira_lines.append(f"- {it.pr.jira_id}: {it.jira.summary}")
+        if jira_lines:
+            header_lines.append("")
+            header_lines.append("**Jira summaries:**")
+            header_lines.extend(jira_lines)
+    header_lines.append("")
+    header_md = "\n".join(header_lines)
 
-    remaining = token_budget - header_tokens - footer_tokens
-    rendered: list[str] = []
-    all_files: list[FileChangeSummary] = []
-    all_modules: list[ModuleSummary] = []
-    dropped_prs: list[tuple[int, str | None]] = []
-    total_dropped_modules: list[str] = []
+    # Module sections (flat — no PR grouping).
+    module_blocks = [
+        "\n".join(_format_module_section(m, detail=detail)) for m in modules
+    ]
 
-    for item in items:
-        file_summaries = _analyze_files(item.pr, item.repo_root)
-        modules = _group_files_by_module(file_summaries)
-        body_md, dropped_modules = _render_pr_body(
-            item.pr, item.jira, modules, file_summaries,
-            token_budget=per_pr_token_budget,
-            count=count,
-            include_header_marker=False,
-            strict_budget=strict_budget,
-        )
-        body_md = "---\n\n" + body_md
-        if strict_budget:
-            block_tokens = count(body_md)
-            if block_tokens > remaining:
-                dropped_prs.append((item.pr.number, item.pr.jira_id))
-                continue
-            remaining -= block_tokens
-        rendered.append(body_md)
-        all_files.extend(file_summaries)
-        all_modules.extend(modules)
-        total_dropped_modules.extend(m.module_name for m in dropped_modules)
+    # Retrieval keys — synthesize a Jira-like object with combined components.
+    synthetic_jira = JiraTicket(components=components_in_scope)
+    retrieval = _format_retrieval_keys(synthetic_jira, merged_files)
 
-    omitted_line = ""
-    if dropped_prs:
-        parts = [f"#{n}" + (f" ({j})" if j else "") for n, j in dropped_prs]
-        omitted_line = (
-            f"\n---\n\n_{len(dropped_prs)} additional PR"
-            f"{'s' if len(dropped_prs) != 1 else ''} omitted for budget: "
-            f"{', '.join(parts)}_\n"
-        )
-
-    parts = [header_md.rstrip(), ""]
-    if rendered:
-        parts.append("\n".join(rendered).rstrip())
+    parts: list[str] = [header_md.rstrip(), ""]
+    if module_blocks:
+        parts.append("\n".join(module_blocks).rstrip())
         parts.append("")
-    if omitted_line:
-        parts.append(omitted_line.rstrip())
+    if retrieval:
+        parts.append("\n".join(retrieval).rstrip())
         parts.append("")
     parts.append(footer_text.rstrip())
     parts.append("")
-
     markdown = "\n".join(parts)
     token_count = count(markdown)
 
     return PromptBundle(
         markdown=markdown,
-        modules=all_modules,
-        files=all_files,
-        dropped_modules=[f"PR #{n}" for n, _ in dropped_prs] + total_dropped_modules,
+        modules=modules,
+        files=merged_files,
+        dropped_modules=[],
         token_count=token_count,
         token_budget=token_budget,
     )

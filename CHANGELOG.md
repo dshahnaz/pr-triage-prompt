@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Format loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-04-18
+
+### Changed (breaking default)
+- **Schema bumped to v3.** Prompt marker now reads `<!-- pr-triage-prompt schema v3 -->`.
+- **`compact` is the new default detail level.** Drops the noisy sections that bloated real 10-PR batches: `## Jira ticket` full body, `## PR description`, `## Changes — summary` table, per-file `Excerpt:` blocks, per-file `- Package:` lines. Kept: compact header (Repo/SHA/Jira + Components + Packages + one-line Jira summary), per-module file/class/function listings, `## Retrieval keys`, footer. Typical token drop: ~60% per prompt.
+- **Combined prompt is now a flat aggregation across all PRs.** No more `# PR #<N>` sections in the combined output — changed files are deduped across PRs (by path; classes/functions unioned) and listed once per module. Jira summaries move to a `**Jira summaries:**` list in the header. This matches what the PAIS agent actually retrieves on and cuts ~30% more over per-PR concatenation.
+
+### Added
+- **`--detail minimal|compact|full`** on `build` + `batch` (and `prompt_detail` in config). `minimal` also drops the Jira summary line; `full` restores every v2-era section.
+- **`--chunk-kb N`** on `batch`: splits the combined prompt into multiple self-contained `prompt_part_01.md`, `prompt_part_02.md`, … each ≤ N KiB. Every chunk carries its own schema marker, batch header with `**Part:** K/N`, and agent-task footer — paste each separately into the PAIS agent. `## Retrieval keys` is only on the last chunk (to save space). `--chunk-kb 0` (default) keeps a single `prompt.md`.
+- `src/pr_triage_prompt/chunk.py`: `split_combined(md, max_bytes=...)` SDK helper.
+
+### Migration
+- If you rely on `# PR #<N>` sections inside the combined prompt, pass `--detail full`. (Those sections still appear in individual `prompt_<N>.md` files regardless of detail level.)
+- Hard-coded schema-v2 references in downstream tooling need a `v3` bump.
+
 ## [0.7.0] — 2026-04-18
 
 ### Added
@@ -113,6 +129,7 @@ Initial release.
 - SDK: `build_prompt(pr, jira, *, repo_cache_dir, token_budget) -> PromptBundle`.
 - Golden test against `examples/pr_23861.json` → `examples/prompt_23861.md` (byte-exact).
 
+[0.8.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.8.0
 [0.7.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.7.0
 [0.6.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.6.0
 [0.5.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.5.0
