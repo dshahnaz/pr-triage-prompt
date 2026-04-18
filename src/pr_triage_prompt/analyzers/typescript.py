@@ -107,3 +107,68 @@ class TypeScriptAnalyzer:
             functions_changed=funcs,
             excerpt=collect_excerpt(added_content),
         )
+
+    def analyze_file(
+        self, file_path: Path, patch: str, status: str, repo_root: Path
+    ) -> FileChangeSummary:
+        abs_path = repo_root / file_path
+        text = abs_path.read_text(encoding="utf-8", errors="replace")
+        analysis = parse_patch(patch)
+        added = analysis.added_line_numbers
+
+        classes: list[str] = []
+        funcs: list[str] = []
+        seen_cls: set[str] = set()
+        seen_fn: set[str] = set()
+        class_stack: list[tuple[int, str]] = []
+        brace_depth = 0
+
+        for lineno, raw in enumerate(text.splitlines(), start=1):
+            content = raw
+            current_class = class_stack[-1][1] if class_stack else None
+
+            m = _CLASS_RE.match(content) or _INTERFACE_RE.match(content)
+            if m:
+                class_stack.append((brace_depth, m.group(1)))
+            else:
+                m_fn = _FUNCTION_DECL_RE.match(content) or _ARROW_RE.match(content)
+                if m_fn and m_fn.group(1) not in _RESERVED:
+                    if lineno in added and m_fn.group(1) not in seen_fn:
+                        seen_fn.add(m_fn.group(1))
+                        funcs.append(m_fn.group(1))
+                elif current_class:
+                    m_meth = _METHOD_RE.match(content)
+                    if (
+                        m_meth
+                        and m_meth.group(1) not in _RESERVED
+                        and m_meth.group(1) != current_class
+                        and lineno in added
+                    ):
+                        label = f"{current_class}.{m_meth.group(1)}"
+                        if label not in seen_fn:
+                            seen_fn.add(label)
+                            funcs.append(label)
+
+            if lineno in added and current_class and current_class not in seen_cls:
+                seen_cls.add(current_class)
+                classes.append(current_class)
+
+            for ch in content:
+                if ch == "{":
+                    brace_depth += 1
+                elif ch == "}":
+                    brace_depth -= 1
+                    while class_stack and class_stack[-1][0] >= brace_depth:
+                        class_stack.pop()
+
+        added_content = [c for (n, c) in analysis.post_image() if n in added]
+        return FileChangeSummary(
+            path=str(file_path),
+            language=self.language,
+            status=status,
+            additions=sum(len(h.added_lines) for h in analysis.hunks),
+            deletions=sum(len(h.removed_lines) for h in analysis.hunks),
+            classes_changed=classes,
+            functions_changed=funcs,
+            excerpt=collect_excerpt(added_content),
+        )

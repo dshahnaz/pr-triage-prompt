@@ -139,7 +139,18 @@ jira_base_url = "https://jira.example.com"
 jira_token_env = "JIRA_TOKEN"
 cache_dir = "~/.cache/pr-triage"
 default_token_budget = 4000
+
+# Required for sparse checkout. {repo} is substituted with the PR's <owner>/<repo> slug.
+# Public GitHub:
+clone_url_template = "https://github.com/{repo}.git"
+# Internal GHE example:
+# clone_url_template = "https://github.example.com/{repo}.git"
 ```
+
+Without `clone_url_template`, the tool never clones: module names and modified-function
+detection are reduced. With it set, the sparse checkout is cached by `(repo, sha)` under
+`~/.cache/pr-triage/`, so the first batch run does the network work and every subsequent
+run is instant.
 
 Resolution order: env var → CLI flag → config file → default. Tokens are read from env only; never echoed.
 

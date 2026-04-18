@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from pr_triage_prompt.analyzers import get_analyzer
+from pr_triage_prompt.analyzers import analyze_with_repo, get_analyzer
 from pr_triage_prompt.models import (
     FileChangeSummary,
     JiraTicket,
@@ -16,16 +16,32 @@ from pr_triage_prompt.models import (
 )
 from pr_triage_prompt.modules import resolve_module
 
-SCHEMA_MARKER = "<!-- pr-triage-prompt schema v1 -->"
+SCHEMA_MARKER = "<!-- pr-triage-prompt schema v2 -->"
 
 AGENT_TASK_FOOTER = (
     "## Task for the agent\n"
     "\n"
-    "Using only the retrieved test-suite context from the knowledge base, list which "
-    "**test cases** (by `suite → test_case`) are most likely to exercise the code "
-    "changed above. For each, include a one-sentence justification tied to a specific "
-    "changed class or function. If nothing in the KB is relevant, say \"none\" — do "
-    "not invent test names.\n"
+    "You have access to a knowledge base of test-suite documents. Each document has a "
+    "top-level suite name, a `## Components` section, and a `## Test Coverage` section "
+    "with per-case entries under `### testXxx` headers describing **Purpose**, "
+    "**Key Operations**, and **API Endpoints**.\n"
+    "\n"
+    "Using **only** the retrieved test-suite context, list which **test cases** are "
+    "most likely to exercise the code changed above. Lean on the *Retrieval keys* "
+    "section (components, packages, classes, operations) and the Jira components to "
+    "match against suite `## Components` and per-case `**Key Operations**` /"
+    " `**API Endpoints**` lines.\n"
+    "\n"
+    "**Output format** — one line per case, exactly:\n"
+    "\n"
+    "    <SuiteName> → <testCaseName> — <one-sentence justification citing a specific "
+    "class, function, operation, or component from the changes above>\n"
+    "\n"
+    "Rules:\n"
+    "- Do not invent test names. If nothing in the KB is relevant, reply exactly `none`.\n"
+    "- Prefer coverage: include every case that plausibly exercises any changed class "
+    "or operation — do not stop at the single best match.\n"
+    "- Do not include setup/fixture cases unless they directly exercise the change.\n"
 )
 
 _SECTION_BOUNDARY = re.compile(r"(?m)^\s*##\s+\S")
@@ -79,16 +95,27 @@ def _group_files_by_module(summaries: list[FileChangeSummary]) -> list[ModuleSum
     return ordered
 
 
-def _format_header(pr: PullRequest) -> list[str]:
-    jira = pr.jira_id or "—"
-    return [
+def _format_header(
+    pr: PullRequest,
+    jira: JiraTicket | None,
+    file_summaries: list[FileChangeSummary],
+) -> list[str]:
+    jira_id = pr.jira_id or "—"
+    lines = [
         SCHEMA_MARKER,
         "",
         f"# PR #{pr.number} — {pr.title}",
         "",
-        f"**Repo:** {pr.repo}   **SHA:** {pr.sha}   **Jira:** {jira}",
-        "",
+        f"**Repo:** {pr.repo}   **SHA:** {pr.sha}   **Jira:** {jira_id}",
     ]
+    components = jira.components if (jira and jira.components) else []
+    if components:
+        lines.append(f"**Components:** {', '.join(components)}")
+    packages = sorted({f.package for f in file_summaries if f.package})
+    if packages:
+        lines.append(f"**Packages:** {', '.join(packages)}")
+    lines.append("")
+    return lines
 
 
 def _format_jira_block(jira: JiraTicket | None) -> list[str]:
@@ -152,6 +179,8 @@ def _format_module_section(module: ModuleSummary) -> list[str]:
     for f in module.files:
         delta = f"+{f.additions}/-{f.deletions}"
         lines.append(f"- `{f.path}` ({f.status}, {delta})")
+        if f.package:
+            lines.append(f"    - Package: `{f.package}`")
         if f.classes_changed:
             lines.append(f"    - Classes: {', '.join(f'`{c}`' for c in f.classes_changed)}")
         if f.functions_changed:
@@ -162,6 +191,40 @@ def _format_module_section(module: ModuleSummary) -> list[str]:
             lines.append("    - Excerpt:")
             for row in f.excerpt.splitlines():
                 lines.append(f"      `{row.rstrip()}`")
+    lines.append("")
+    return lines
+
+
+def _format_retrieval_keys(
+    jira: JiraTicket | None,
+    file_summaries: list[FileChangeSummary],
+) -> list[str]:
+    components = jira.components if (jira and jira.components) else []
+    packages = sorted({f.package for f in file_summaries if f.package})
+    classes: list[str] = []
+    seen_c: set[str] = set()
+    funcs: list[str] = []
+    seen_f: set[str] = set()
+    for f in file_summaries:
+        for c in f.classes_changed:
+            if c not in seen_c:
+                seen_c.add(c)
+                classes.append(c)
+        for fn in f.functions_changed:
+            if fn not in seen_f:
+                seen_f.add(fn)
+                funcs.append(fn)
+    if not (components or packages or classes or funcs):
+        return []
+    lines = ["## Retrieval keys (for the test-suite knowledge base)", ""]
+    if components:
+        lines.append(f"- Components: {', '.join(components)}")
+    if packages:
+        lines.append(f"- Packages: {', '.join(packages)}")
+    if classes:
+        lines.append(f"- Classes: {', '.join(classes)}")
+    if funcs:
+        lines.append(f"- Operations: {', '.join(funcs)}")
     lines.append("")
     return lines
 
@@ -211,12 +274,12 @@ def _analyze_files(pr: PullRequest, repo_root: Path | None) -> list[FileChangeSu
                 deletions=f.deletions,
             )
         else:
-            summary = analyzer.analyze(Path(f.filename), f.patch, f.status)
+            summary = analyze_with_repo(analyzer, Path(f.filename), f.patch, f.status, repo_root)
             # Prefer the GitHub-provided counts when the analyzer saw fewer + lines
             # than the PR metadata promised (happens for binary/rename patches).
             summary.additions = max(summary.additions, f.additions)
             summary.deletions = max(summary.deletions, f.deletions)
-        module = resolve_module(f.filename, repo_root)
+        module = resolve_module(f.filename, repo_root, hint_name=summary.package)
         summary.module_name = module.module_name
         summary.module_path = module.module_path
         summaries.append(summary)
@@ -227,6 +290,7 @@ def _render_pr_body(
     pr: PullRequest,
     jira: JiraTicket | None,
     modules: list[ModuleSummary],
+    file_summaries: list[FileChangeSummary],
     *,
     token_budget: int,
     count,
@@ -235,22 +299,21 @@ def _render_pr_body(
 ) -> tuple[str, list[ModuleSummary]]:
     """Render one PR's markdown block (no agent-task footer).
 
-    If `include_header_marker` is False, the leading `<!-- pr-triage-prompt schema v1 -->`
-    line is omitted — the caller is expected to supply it once at the top of the document.
-    When `strict_budget` is False (default) every module is emitted in full regardless of
-    `token_budget`; when True, modules are greedy-packed until the budget is hit and the
-    rest collapse to a single "N additional modules omitted" line.
+    If `include_header_marker` is False, the leading schema marker is omitted — the caller
+    is expected to supply it once at the top of the document. When `strict_budget` is
+    False (default) every module is emitted in full regardless of `token_budget`.
 
     Returns (markdown, dropped_modules).
     """
     head: list[str] = []
-    for line in _format_header(pr):
+    for line in _format_header(pr, jira, file_summaries):
         if line == SCHEMA_MARKER and not include_header_marker:
             continue
         head.append(line)
     head.extend(_format_jira_block(jira))
     head.extend(_format_pr_body(pr))
     head.extend(_format_summary_table(modules))
+    head.extend(_format_retrieval_keys(jira, file_summaries))
 
     head_text = "\n".join(head)
 
@@ -299,7 +362,7 @@ def build_prompt(
     count = _token_counter()
     footer_tokens = count(AGENT_TASK_FOOTER)
     body_md, dropped = _render_pr_body(
-        pr, jira, modules,
+        pr, jira, modules, file_summaries,
         token_budget=token_budget - footer_tokens,
         count=count,
         strict_budget=strict_budget,
@@ -352,7 +415,17 @@ def build_combined_prompt(
     repos = sorted({it.pr.repo for it in items if it.pr.repo})
     if repos:
         header_parts.append("**Repos:** " + ", ".join(repos))
-        header_parts.append("")
+    components_in_scope: list[str] = []
+    seen_c: set[str] = set()
+    for it in items:
+        if it.jira and it.jira.components:
+            for c in it.jira.components:
+                if c not in seen_c:
+                    seen_c.add(c)
+                    components_in_scope.append(c)
+    if components_in_scope:
+        header_parts.append("**Components in scope:** " + ", ".join(components_in_scope))
+    header_parts.append("")
     header_md = "\n".join(header_parts)
     header_tokens = count(header_md)
 
@@ -367,7 +440,7 @@ def build_combined_prompt(
         file_summaries = _analyze_files(item.pr, item.repo_root)
         modules = _group_files_by_module(file_summaries)
         body_md, dropped_modules = _render_pr_body(
-            item.pr, item.jira, modules,
+            item.pr, item.jira, modules, file_summaries,
             token_budget=per_pr_token_budget,
             count=count,
             include_header_marker=False,

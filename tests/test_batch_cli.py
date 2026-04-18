@@ -57,7 +57,7 @@ def test_batch_emits_per_pr_and_combined(tmp_path: Path) -> None:
     assert (out / "prompt.md").is_file()
 
     combined = (out / "prompt.md").read_text(encoding="utf-8")
-    assert combined.count("<!-- pr-triage-prompt schema v1 -->") == 1
+    assert combined.count("<!-- pr-triage-prompt schema v2 -->") == 1
     assert combined.count("## Task for the agent") == 1
     assert "# Batch prompt — 2 PRs" in combined
     assert "First" in combined

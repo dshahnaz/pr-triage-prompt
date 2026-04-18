@@ -52,6 +52,6 @@ def test_loose_budget_keeps_everything_in_both_modes() -> None:
 def test_schema_marker_and_footer_always_present() -> None:
     pr = _mk_pr(num_modules=1)
     bundle = build_prompt(pr, jira=None, token_budget=8000)
-    assert bundle.markdown.startswith("<!-- pr-triage-prompt schema v1 -->")
+    assert bundle.markdown.startswith("<!-- pr-triage-prompt schema v2 -->")
     assert "Task for the agent" in bundle.markdown
-    assert "Using only the retrieved test-suite context" in bundle.markdown
+    assert "Using **only** the retrieved test-suite context" in bundle.markdown

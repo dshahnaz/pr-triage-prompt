@@ -22,6 +22,34 @@ class LanguageAnalyzer(Protocol):
 
     def analyze(self, file_path: Path, patch: str, status: str) -> FileChangeSummary: ...
 
+    def analyze_file(
+        self, file_path: Path, patch: str, status: str, repo_root: Path
+    ) -> FileChangeSummary:
+        """Richer analysis using the checked-out source.
+
+        Default implementation falls back to patch-only `analyze`; language analyzers
+        override to pick up symbols that live outside the visible patch hunks (e.g. a
+        method modified in its body whose declaration is earlier in the file).
+        """
+        ...
+
+
+def analyze_with_repo(
+    analyzer: LanguageAnalyzer,
+    file_path: Path,
+    patch: str,
+    status: str,
+    repo_root: Path | None,
+) -> FileChangeSummary:
+    """Dispatch helper: use the full-file path when we have the checkout, else patch-only."""
+    if repo_root is not None and hasattr(analyzer, "analyze_file"):
+        try:
+            return analyzer.analyze_file(file_path, patch, status, repo_root)
+        except FileNotFoundError:
+            # File may be missing from sparse checkout — fall back.
+            pass
+    return analyzer.analyze(file_path, patch, status)
+
 
 def register_analyzer(cls: type) -> type:
     """Class decorator: instantiate and register under each declared extension."""

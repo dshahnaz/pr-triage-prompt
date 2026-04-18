@@ -26,6 +26,14 @@ class Config:
     jira_username: str | None = None
     cache_dir: Path = field(default_factory=lambda: DEFAULT_CACHE_DIR)
     default_token_budget: int = DEFAULT_TOKEN_BUDGET
+    clone_url_template: str | None = None
+    """Git URL template for sparse checkout. `{repo}` is substituted with the PR's
+    `<owner>/<repo>` slug. No built-in default — cloning is skipped unless this is set."""
+
+    def resolved_clone_url(self, repo: str) -> str | None:
+        if not self.clone_url_template:
+            return None
+        return self.clone_url_template.format(repo=repo)
 
     def resolved_cache_dir(self) -> Path:
         return Path(os.path.expanduser(str(self.cache_dir))).resolve()
@@ -60,6 +68,8 @@ def load_config(path: Path | None = None) -> Config:
         cfg.cache_dir = Path(data["cache_dir"]).expanduser()
     if isinstance(data.get("default_token_budget"), int):
         cfg.default_token_budget = data["default_token_budget"]
+    if isinstance(data.get("clone_url_template"), str):
+        cfg.clone_url_template = data["clone_url_template"]
     return cfg
 
 

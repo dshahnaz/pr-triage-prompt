@@ -78,6 +78,44 @@ def _load_pr(pr_ref: str, cfg: Config) -> PullRequest:
     return fetch_pr_live(parsed.owner_repo, parsed.number, token)
 
 
+_CHECKOUT_WARNED_NO_URL = False
+
+
+def _maybe_checkout(
+    cfg: Config, pr_repo: str, pr_sha: str, file_paths: list[str], no_cache: bool
+) -> tuple[Path | None, str]:
+    """Return (repo_root, status) where status is 'yes' | 'no' | 'fail'."""
+    global _CHECKOUT_WARNED_NO_URL
+    clone_url = cfg.resolved_clone_url(pr_repo)
+    if clone_url is None:
+        if not _CHECKOUT_WARNED_NO_URL:
+            typer.echo(
+                "note: no clone_url_template configured; proceeding without a source checkout "
+                "(module names + modified-function detection degraded). Set `clone_url_template` "
+                "in ~/.pr-triage/config.toml or pass --clone-url.",
+                err=True,
+            )
+            _CHECKOUT_WARNED_NO_URL = True
+        return None, "no"
+    try:
+        repo_root = ensure_checkout(
+            cache_root=cfg.resolved_cache_dir(),
+            repo=pr_repo,
+            sha=pr_sha,
+            clone_url=clone_url,
+            paths=file_paths,
+            no_cache=no_cache,
+        )
+        return repo_root, "yes"
+    except Exception as exc:
+        typer.echo(
+            f"warning: sparse checkout failed for {pr_repo}@{pr_sha[:12]} "
+            f"({type(exc).__name__}: {exc}); using degraded resolver",
+            err=True,
+        )
+        return None, "fail"
+
+
 def _load_jira(
     jira_file: Path | None, jira_key: str | None, cfg: Config, pr_hint: str | None
 ) -> JiraTicket | None:
@@ -113,34 +151,22 @@ def build(
         "--strict-budget",
         help="Drop overflowing modules to stay near the budget (old behavior).",
     ),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass sparse-checkout cache."),
-    skip_checkout: bool = typer.Option(
-        False, "--skip-checkout", help="Skip sparse checkout (use degraded module resolver)."
+    no_cache: bool = typer.Option(False, "--no-cache", help="Force-refresh the sparse-checkout cache."),
+    clone_url: str | None = typer.Option(
+        None,
+        "--clone-url",
+        help="Git URL template (with `{repo}`) for the sparse checkout. "
+        "Overrides `clone_url_template` in ~/.pr-triage/config.toml.",
     ),
 ) -> None:
     """Build a Markdown prompt from a PR (+ Jira ticket)."""
     cfg = load_config()
+    if clone_url:
+        cfg.clone_url_template = clone_url
     pr = _load_pr(pr_ref, cfg)
     jira = _load_jira(jira_file, jira_key, cfg, pr.jira_id)
 
-    repo_root: Path | None = None
-    if not skip_checkout:
-        try:
-            repo_root = ensure_checkout(
-                cache_root=cfg.resolved_cache_dir(),
-                repo=pr.repo,
-                sha=pr.sha,
-                clone_url=f"https://github.com/{pr.repo}.git",
-                paths=[f.filename for f in pr.files],
-                no_cache=no_cache,
-            )
-        except Exception as exc:
-            typer.echo(
-                f"warning: sparse checkout failed ({type(exc).__name__}: {exc}); "
-                "falling back to degraded module resolver",
-                err=True,
-            )
-            repo_root = None
+    repo_root, _ = _maybe_checkout(cfg, pr.repo, pr.sha, [f.filename for f in pr.files], no_cache)
 
     budget = token_budget or cfg.default_token_budget
     bundle = build_prompt(
@@ -188,11 +214,13 @@ def batch(
         "--strict-budget",
         help="Drop overflowing modules/PRs to stay near budgets (old behavior).",
     ),
-    skip_checkout: bool = typer.Option(
-        True, "--skip-checkout/--checkout",
-        help="Skip sparse checkout in batch mode (default: skip).",
+    no_cache: bool = typer.Option(False, "--no-cache", help="Force-refresh the sparse-checkout cache."),
+    clone_url: str | None = typer.Option(
+        None,
+        "--clone-url",
+        help="Git URL template (with `{repo}`) for the sparse checkout. "
+        "Overrides `clone_url_template` in ~/.pr-triage/config.toml.",
     ),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass sparse-checkout cache."),
     fmt: OutputFormat = typer.Option(OutputFormat.md, "--format", help="Output format."),
     quiet: bool = typer.Option(
         False, "--quiet", "-q", help="Suppress per-PR progress lines; always prints the final report."
@@ -204,6 +232,8 @@ def batch(
     fallback on the `key` field). Writes per-PR files and/or one combined prompt.
     """
     cfg = load_config()
+    if clone_url:
+        cfg.clone_url_template = clone_url
     items = discover_context(context_dir)
     if not items:
         typer.echo(f"no pr_*.json files in {context_dir}", err=True)
@@ -212,32 +242,14 @@ def batch(
     out_dir.mkdir(parents=True, exist_ok=True)
     budget = token_budget or cfg.default_token_budget
 
-    def _checkout(pr_repo: str, pr_sha: str, file_paths: list[str]) -> Path | None:
-        if skip_checkout:
-            return None
-        try:
-            return ensure_checkout(
-                cache_root=cfg.resolved_cache_dir(),
-                repo=pr_repo,
-                sha=pr_sha,
-                clone_url=f"https://github.com/{pr_repo}.git",
-                paths=file_paths,
-                no_cache=no_cache,
-            )
-        except Exception as exc:
-            typer.echo(
-                f"warning: checkout failed for {pr_repo}@{pr_sha[:12]} "
-                f"({type(exc).__name__}: {exc}); using degraded resolver",
-                err=True,
-            )
-            return None
-
     # Per-PR pass.
     report_rows: list[dict[str, object]] = []
     batch_items: list[BatchItem] = []
     matched_with_content = 0
     for item in items:
-        repo_root = _checkout(item.pr.repo, item.pr.sha, [f.filename for f in item.pr.files])
+        repo_root, checkout_status = _maybe_checkout(
+            cfg, item.pr.repo, item.pr.sha, [f.filename for f in item.pr.files], no_cache
+        )
         bundle = build_prompt(
             item.pr, item.jira,
             repo_root=repo_root, token_budget=budget, strict_budget=strict_budget,
@@ -249,7 +261,8 @@ def batch(
         if not quiet:
             typer.echo(
                 f"  PR #{item.pr.number}  jira={item.pr.jira_id or '—'}  match={jira_note}  "
-                f"tokens={bundle.token_count}  modules={len(bundle.modules)}"
+                f"tokens={bundle.token_count}  modules={len(bundle.modules)}  "
+                f"checkout={checkout_status}"
                 + (f" (dropped {len(bundle.dropped_modules)})" if bundle.dropped_modules else "")
             )
 
@@ -268,7 +281,9 @@ def batch(
                 "tokens": bundle.token_count,
                 "budget": bundle.token_budget,
                 "modules": len(bundle.modules),
+                "files": len(item.pr.files),
                 "jira": jira_note,
+                "checkout": checkout_status,
                 "over": bundle.token_count > bundle.token_budget,
                 "pr_number": item.pr.number,
             })
@@ -295,7 +310,9 @@ def batch(
             "tokens": combined.token_count,
             "budget": combined.token_budget,
             "modules": len(combined.modules),
+            "files": sum(len(it.pr.files) for it in items),
             "jira": f"{matched_with_content}/{len(items)} matched",
+            "checkout": "",
             "over": combined.token_count > combined.token_budget,
             "pr_number": None,
         })
@@ -317,7 +334,7 @@ def _truncate_file(path: str, width: int = 60) -> str:
 
 
 def _print_report(rows: list[dict[str, object]]) -> None:
-    """Fixed-width report: File | Tokens | Budget | Modules | Jira | Over?."""
+    """Fixed-width report: File | Tokens | Budget | Files | Modules | Checkout | Jira | Over?."""
     if not rows:
         return
     display_rows: list[dict[str, str]] = []
@@ -327,7 +344,9 @@ def _print_report(rows: list[dict[str, object]]) -> None:
                 "file": _truncate_file(str(r["file"])),
                 "tokens": str(r["tokens"]),
                 "budget": str(r["budget"]),
+                "files": str(r.get("files", "")),
                 "modules": str(r["modules"]),
+                "checkout": str(r.get("checkout", "")),
                 "jira": str(r["jira"]),
                 "over": "yes" if r["over"] else "",
             }
@@ -336,7 +355,9 @@ def _print_report(rows: list[dict[str, object]]) -> None:
         "file": "File",
         "tokens": "Tokens",
         "budget": "Budget",
+        "files": "Files",
         "modules": "Modules",
+        "checkout": "Checkout",
         "jira": "Jira",
         "over": "Over?",
     }
@@ -344,13 +365,15 @@ def _print_report(rows: list[dict[str, object]]) -> None:
         k: max(len(headers[k]), *(len(row[k]) for row in display_rows))
         for k in headers
     }
-    # File left-aligned; numbers right-aligned; jira/over left-aligned.
+
     def _fmt(row: dict[str, str]) -> str:
         return (
             f"  {row['file']:<{widths['file']}}"
             f"  {row['tokens']:>{widths['tokens']}}"
             f"  {row['budget']:>{widths['budget']}}"
+            f"  {row['files']:>{widths['files']}}"
             f"  {row['modules']:>{widths['modules']}}"
+            f"  {row['checkout']:<{widths['checkout']}}"
             f"  {row['jira']:<{widths['jira']}}"
             f"  {row['over']:<{widths['over']}}"
         )

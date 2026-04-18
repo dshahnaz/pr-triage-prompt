@@ -1,0 +1,13 @@
+{
+  "key": "VCOPS-75787",
+  "summary": "[Flow Analytics - Port to ESM] Enhance combobox - support for nested options",
+  "description": "Found Styling inconsistencies found across the components used in the form, we need to address it fro consistent look and feel wrt to other pages in VCF OPS\r\n\r\n \r\n\r\n- Dropdown, Select , Font inconsistency\r\n- Select, Dropdown,  border, color inconsistency ",
+  "status": "",
+  "issue_type": "",
+  "priority": "",
+  "components": [
+    "Network Operations"
+  ],
+  "labels": [],
+  "fix_versions": []
+}

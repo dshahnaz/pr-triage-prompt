@@ -7,6 +7,7 @@ from pr_triage_prompt.analyzers import java, python, typescript  # noqa: F401
 from pr_triage_prompt.analyzers.base import (
     FileChangeSummary,
     LanguageAnalyzer,
+    analyze_with_repo,
     get_analyzer,
     register_analyzer,
     registered_analyzers,
@@ -15,6 +16,7 @@ from pr_triage_prompt.analyzers.base import (
 __all__ = [
     "FileChangeSummary",
     "LanguageAnalyzer",
+    "analyze_with_repo",
     "get_analyzer",
     "register_analyzer",
     "registered_analyzers",

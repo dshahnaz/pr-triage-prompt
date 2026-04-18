@@ -188,11 +188,15 @@ def _descriptor_module_name(descriptor_path: Path, descriptor_name: str) -> str 
     return None
 
 
-def resolve_module(rel_path: str, repo_root: Path | None) -> ResolvedModule:
+def resolve_module(
+    rel_path: str, repo_root: Path | None, *, hint_name: str | None = None
+) -> ResolvedModule:
     """Resolve the module for a changed file.
 
     When `repo_root` is None (no checkout available), returns a degraded module
-    based on path segments so the prompt still has useful grouping.
+    based on path segments so the prompt still has useful grouping. If `hint_name`
+    is supplied (e.g. a Java package extracted from the file itself), it takes
+    precedence over the path-segment heuristic.
     """
     rel = PurePosixPath(rel_path)
     if repo_root is not None:
@@ -209,11 +213,13 @@ def resolve_module(rel_path: str, repo_root: Path | None) -> ResolvedModule:
                 descriptor=descriptor_name,
             )
 
-    # Degraded mode: use the last non-empty directory segment as the module.
+    # Degraded mode: prefer an explicit hint (e.g. Java `package` declaration).
+    if hint_name:
+        return ResolvedModule(module_name=hint_name, module_path="", descriptor=None)
+
     parts = [p for p in rel.parent.parts if p not in ("", ".")]
     if not parts:
         return ResolvedModule(module_name="(root)", module_path="", descriptor=None)
-    # Prefer a segment that looks module-ish (common test/module roots).
     for segment in reversed(parts):
         if segment.lower() not in ("src", "main", "java", "test", "tests", "resources"):
             return ResolvedModule(

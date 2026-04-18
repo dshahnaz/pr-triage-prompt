@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here. Format loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-04-18
+
+### Changed (breaking)
+- **Prompt schema bumped to v2.** The marker is now `<!-- pr-triage-prompt schema v2 -->`. Header gains `**Components:**` (from Jira) and `**Packages:**` (extracted from source) lines; the `## Retrieval keys` section is added before the agent-task footer; the footer itself is rewritten to cite the test-suite KB format (suite / test-case / `## Components` / **Key Operations** / **API Endpoints**) and pin an explicit one-line output format.
+- **`--skip-checkout` removed.** The tool now always attempts a sparse checkout when `clone_url_template` resolves. The `(repo, sha)` cache means subsequent runs are instant. `--no-cache` remains as the "force re-clone" escape hatch.
+- **No built-in clone URL.** `clone_url_template` must be set in `~/.pr-triage/config.toml` or passed via `--clone-url`. Without it, the tool prints a one-time stderr note and falls back to degraded analysis (no hard error).
+
+### Added
+- **Full-file analysis** when source is available. Analyzers now pick up methods that were only **modified in their body** — previously missed because the patch hunk didn't include the declaration.
+- **Java package extraction** from source (`package com.foo.bar;`), used as a module-name hint in degraded mode and surfaced as `**Packages:**` in the prompt header plus a per-file `- Package: ...` line.
+- **Python package extraction** from `__init__.py` walk → dotted path (e.g. `pkg.mod`).
+- **`clone_url_template` config / `--clone-url` flag** with `{repo}` placeholder — supports internal GitHub Enterprise / GitLab.
+- **Report columns: `Files` + `Checkout`** in `pr-triage batch`, so you can see how many files each PR touched and whether the sparse checkout ran (`yes`/`no`/`fail`).
+- `analyze_file(file_path, patch, status, repo_root)` on the `LanguageAnalyzer` Protocol; custom analyzers can override it to read from the checkout.
+- `FileChangeSummary.package` field and the `Retrieval keys` block in the SDK's `PromptBundle.json_payload`.
+
+### Migration
+- If you relied on `--skip-checkout`, drop the flag; the tool behaves the same as `--skip-checkout` when `clone_url_template` isn't configured.
+- If you have tooling reading the schema-v1 footer verbatim, update it for schema v2. The macro shape (header → Jira → PR description → summary table → per-module sections → agent-task footer) is unchanged; only the marker and the footer's wording changed.
+- Golden prompt regenerated (`examples/prompt_23861.md`) with the new layout.
+
 ## [0.3.0] — 2026-04-18
 
 ### Changed (breaking default)
@@ -38,6 +59,7 @@ Initial release.
 - SDK: `build_prompt(pr, jira, *, repo_cache_dir, token_budget) -> PromptBundle`.
 - Golden test against `examples/pr_23861.json` → `examples/prompt_23861.md` (byte-exact).
 
+[0.4.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.4.0
 [0.3.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.3.0
 [0.2.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.2.0
 [0.1.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.1.0

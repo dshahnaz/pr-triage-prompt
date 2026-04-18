@@ -8,7 +8,7 @@ from pr_triage_prompt.models import (
     PullRequest,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 def __getattr__(name: str):  # pragma: no cover - trivial

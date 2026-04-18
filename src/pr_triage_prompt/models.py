@@ -66,6 +66,8 @@ class FileChangeSummary(BaseModel):
     excerpt: str = ""
     module_path: str | None = None
     module_name: str | None = None
+    package: str | None = None
+    """Language namespace (Java package, Python dotted module path) — informative only."""
 
 
 class ModuleSummary(BaseModel):

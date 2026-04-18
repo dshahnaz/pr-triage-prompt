@@ -26,7 +26,7 @@ def test_combined_prompt_has_one_schema_marker_and_one_footer() -> None:
     items = [BatchItem(pr=_mk_pr(1)), BatchItem(pr=_mk_pr(2)), BatchItem(pr=_mk_pr(3))]
     bundle = build_combined_prompt(items, token_budget=16000)
     md = bundle.markdown
-    assert md.count("<!-- pr-triage-prompt schema v1 -->") == 1
+    assert md.count("<!-- pr-triage-prompt schema v2 -->") == 1
     assert md.count("## Task for the agent") == 1
     # Each PR appears as its own section.
     assert md.count("# PR #1 — PR 1") == 1

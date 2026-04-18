@@ -23,7 +23,6 @@ def test_golden_matches(tmp_path: Path) -> None:
             str(PR_FIXTURE),
             "--jira-file",
             str(JIRA_FIXTURE),
-            "--skip-checkout",
             "--out",
             str(out_path),
         ],
@@ -35,6 +34,6 @@ def test_golden_matches(tmp_path: Path) -> None:
     assert actual == expected, (
         f"Golden mismatch. Regenerate with:\n"
         f"  pr-triage build {PR_FIXTURE.relative_to(REPO_ROOT)} "
-        f"--jira-file {JIRA_FIXTURE.relative_to(REPO_ROOT)} --skip-checkout "
+        f"--jira-file {JIRA_FIXTURE.relative_to(REPO_ROOT)} "
         f"--out {GOLDEN.relative_to(REPO_ROOT)}"
     )
