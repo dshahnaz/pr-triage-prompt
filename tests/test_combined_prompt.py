@@ -41,11 +41,22 @@ def test_combined_prompt_batch_title_and_repos() -> None:
     assert "**Repos:** a/b" in bundle.markdown
 
 
-def test_combined_prompt_tight_budget_drops_later_prs() -> None:
+def test_combined_prompt_strict_tight_budget_drops_later_prs() -> None:
     items = [BatchItem(pr=_mk_pr(n)) for n in range(1, 6)]
-    bundle = build_combined_prompt(items, token_budget=400, per_pr_token_budget=200)
+    bundle = build_combined_prompt(
+        items, token_budget=400, per_pr_token_budget=200, strict_budget=True
+    )
     assert "additional PR" in bundle.markdown
     assert any(mod.startswith("PR #") for mod in bundle.dropped_modules)
+
+
+def test_combined_prompt_default_keeps_every_pr_even_over_budget() -> None:
+    items = [BatchItem(pr=_mk_pr(n)) for n in range(1, 6)]
+    bundle = build_combined_prompt(items, token_budget=400, per_pr_token_budget=200)
+    assert "additional PR" not in bundle.markdown
+    assert not any(mod.startswith("PR #") for mod in bundle.dropped_modules)
+    # Token count is allowed to exceed budget in non-strict mode.
+    assert bundle.token_count > bundle.token_budget
 
 
 def test_combined_prompt_jira_per_pr() -> None:

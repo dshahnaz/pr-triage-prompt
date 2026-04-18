@@ -231,11 +231,16 @@ def _render_pr_body(
     token_budget: int,
     count,
     include_header_marker: bool = True,
+    strict_budget: bool = False,
 ) -> tuple[str, list[ModuleSummary]]:
     """Render one PR's markdown block (no agent-task footer).
 
     If `include_header_marker` is False, the leading `<!-- pr-triage-prompt schema v1 -->`
     line is omitted — the caller is expected to supply it once at the top of the document.
+    When `strict_budget` is False (default) every module is emitted in full regardless of
+    `token_budget`; when True, modules are greedy-packed until the budget is hit and the
+    rest collapse to a single "N additional modules omitted" line.
+
     Returns (markdown, dropped_modules).
     """
     head: list[str] = []
@@ -248,19 +253,23 @@ def _render_pr_body(
     head.extend(_format_summary_table(modules))
 
     head_text = "\n".join(head)
-    head_tokens = count(head_text)
-    remaining = token_budget - head_tokens
 
     rendered_modules: list[str] = []
     dropped: list[ModuleSummary] = []
-    for m in modules:
-        block = "\n".join(_format_module_section(m))
-        block_tokens = count(block)
-        if block_tokens <= remaining:
-            rendered_modules.append(block)
-            remaining -= block_tokens
-        else:
-            dropped.append(m)
+    if strict_budget:
+        head_tokens = count(head_text)
+        remaining = token_budget - head_tokens
+        for m in modules:
+            block = "\n".join(_format_module_section(m))
+            block_tokens = count(block)
+            if block_tokens <= remaining:
+                rendered_modules.append(block)
+                remaining -= block_tokens
+            else:
+                dropped.append(m)
+    else:
+        for m in modules:
+            rendered_modules.append("\n".join(_format_module_section(m)))
 
     body_parts: list[str] = [head_text.rstrip(), ""]
     if rendered_modules:
@@ -276,8 +285,14 @@ def build_prompt(
     *,
     repo_root: Path | None = None,
     token_budget: int = 4000,
+    strict_budget: bool = False,
 ) -> PromptBundle:
-    """Build the Markdown prompt + structured bundle."""
+    """Build the Markdown prompt + structured bundle.
+
+    By default nothing is trimmed — `token_budget` is reported as an informational
+    target. Pass `strict_budget=True` to drop overflowing modules into a one-line
+    summary (the historic behavior).
+    """
     file_summaries = _analyze_files(pr, repo_root)
     modules = _group_files_by_module(file_summaries)
 
@@ -287,6 +302,7 @@ def build_prompt(
         pr, jira, modules,
         token_budget=token_budget - footer_tokens,
         count=count,
+        strict_budget=strict_budget,
     )
 
     markdown = body_md + "\n" + AGENT_TASK_FOOTER.rstrip() + "\n"
@@ -316,12 +332,14 @@ def build_combined_prompt(
     *,
     token_budget: int = 16000,
     per_pr_token_budget: int = 4000,
+    strict_budget: bool = False,
 ) -> PromptBundle:
     """Build one combined prompt covering many PRs with a single agent-task footer.
 
-    Greedy-fill: each PR gets up to `per_pr_token_budget` tokens. PRs that don't fit
-    the remaining `token_budget` are replaced with a one-line "N additional PRs omitted"
-    notice.
+    By default every PR is emitted in full and the budgets are informational targets.
+    When `strict_budget=True`, each PR's module list is greedy-packed against
+    `per_pr_token_budget` and PRs that don't fit the remaining `token_budget` are
+    collapsed to a one-line "N additional PRs omitted" notice.
     """
     count = _token_counter()
     footer_tokens = count(AGENT_TASK_FOOTER)
@@ -353,17 +371,19 @@ def build_combined_prompt(
             token_budget=per_pr_token_budget,
             count=count,
             include_header_marker=False,
+            strict_budget=strict_budget,
         )
         body_md = "---\n\n" + body_md
-        block_tokens = count(body_md)
-        if block_tokens <= remaining:
-            rendered.append(body_md)
+        if strict_budget:
+            block_tokens = count(body_md)
+            if block_tokens > remaining:
+                dropped_prs.append((item.pr.number, item.pr.jira_id))
+                continue
             remaining -= block_tokens
-            all_files.extend(file_summaries)
-            all_modules.extend(modules)
-            total_dropped_modules.extend(m.module_name for m in dropped_modules)
-        else:
-            dropped_prs.append((item.pr.number, item.pr.jira_id))
+        rendered.append(body_md)
+        all_files.extend(file_summaries)
+        all_modules.extend(modules)
+        total_dropped_modules.extend(m.module_name for m in dropped_modules)
 
     omitted_line = ""
     if dropped_prs:

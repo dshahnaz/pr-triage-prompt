@@ -27,17 +27,26 @@ def _mk_pr(num_modules: int) -> PullRequest:
     )
 
 
-def test_tight_budget_drops_modules() -> None:
+def test_non_strict_keeps_everything_even_when_over_budget() -> None:
     pr = _mk_pr(num_modules=6)
     bundle = build_prompt(pr, jira=None, token_budget=200)
-    assert bundle.dropped_modules, "Expected at least one module dropped under a tight budget"
+    assert bundle.dropped_modules == []
+    assert "additional modules omitted" not in bundle.markdown
+    # And the bundle records an over-budget state for the caller to surface.
+    assert bundle.token_count > bundle.token_budget
+
+
+def test_strict_budget_drops_overflow_modules() -> None:
+    pr = _mk_pr(num_modules=6)
+    bundle = build_prompt(pr, jira=None, token_budget=200, strict_budget=True)
+    assert bundle.dropped_modules, "Expected at least one module dropped under strict mode"
     assert "additional modules omitted" in bundle.markdown
 
 
-def test_loose_budget_keeps_everything() -> None:
+def test_loose_budget_keeps_everything_in_both_modes() -> None:
     pr = _mk_pr(num_modules=3)
-    bundle = build_prompt(pr, jira=None, token_budget=8000)
-    assert bundle.dropped_modules == []
+    assert build_prompt(pr, jira=None, token_budget=8000).dropped_modules == []
+    assert build_prompt(pr, jira=None, token_budget=8000, strict_budget=True).dropped_modules == []
 
 
 def test_schema_marker_and_footer_always_present() -> None:

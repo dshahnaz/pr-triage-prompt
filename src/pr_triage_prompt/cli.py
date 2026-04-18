@@ -106,7 +106,12 @@ def build(
     out: Path | None = typer.Option(None, "--out", help="Output file path."),
     fmt: OutputFormat = typer.Option(OutputFormat.md, "--format", help="Output format."),
     token_budget: int | None = typer.Option(
-        None, "--token-budget", help="Override token budget."
+        None, "--token-budget", help="Override token budget (informational by default)."
+    ),
+    strict_budget: bool = typer.Option(
+        False,
+        "--strict-budget",
+        help="Drop overflowing modules to stay near the budget (old behavior).",
     ),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass sparse-checkout cache."),
     skip_checkout: bool = typer.Option(
@@ -138,7 +143,9 @@ def build(
             repo_root = None
 
     budget = token_budget or cfg.default_token_budget
-    bundle = build_prompt(pr, jira, repo_root=repo_root, token_budget=budget)
+    bundle = build_prompt(
+        pr, jira, repo_root=repo_root, token_budget=budget, strict_budget=strict_budget,
+    )
 
     if fmt is OutputFormat.md:
         payload = bundle.markdown
@@ -171,10 +178,15 @@ def batch(
         "prompt.md", "--combined-name", help="Filename for the combined prompt."
     ),
     token_budget: int | None = typer.Option(
-        None, "--token-budget", help="Per-PR token budget (default from config)."
+        None, "--token-budget", help="Per-PR token budget (informational by default)."
     ),
     combined_budget: int = typer.Option(
         16000, "--combined-budget", help="Token budget for the combined prompt."
+    ),
+    strict_budget: bool = typer.Option(
+        False,
+        "--strict-budget",
+        help="Drop overflowing modules/PRs to stay near budgets (old behavior).",
     ),
     skip_checkout: bool = typer.Option(
         True, "--skip-checkout/--checkout",
@@ -182,6 +194,9 @@ def batch(
     ),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass sparse-checkout cache."),
     fmt: OutputFormat = typer.Option(OutputFormat.md, "--format", help="Output format."),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Suppress per-PR progress lines; always prints the final report."
+    ),
 ) -> None:
     """Build prompts from every pr_*.json in a context folder.
 
@@ -218,21 +233,25 @@ def batch(
             return None
 
     # Per-PR pass.
-    pr_bundles: list[tuple[Path, int, object]] = []
+    report_rows: list[dict[str, object]] = []
     batch_items: list[BatchItem] = []
     matched_with_content = 0
     for item in items:
         repo_root = _checkout(item.pr.repo, item.pr.sha, [f.filename for f in item.pr.files])
-        bundle = build_prompt(item.pr, item.jira, repo_root=repo_root, token_budget=budget)
+        bundle = build_prompt(
+            item.pr, item.jira,
+            repo_root=repo_root, token_budget=budget, strict_budget=strict_budget,
+        )
         batch_items.append(BatchItem(pr=item.pr, jira=item.jira, repo_root=repo_root))
         jira_note = item.jira_match
         if item.jira is not None and item.jira.has_content:
             matched_with_content += 1
-        typer.echo(
-            f"  PR #{item.pr.number}  jira={item.pr.jira_id or '—'}  match={jira_note}  "
-            f"tokens={bundle.token_count}  modules={len(bundle.modules)}"
-            + (f" (dropped {len(bundle.dropped_modules)})" if bundle.dropped_modules else "")
-        )
+        if not quiet:
+            typer.echo(
+                f"  PR #{item.pr.number}  jira={item.pr.jira_id or '—'}  match={jira_note}  "
+                f"tokens={bundle.token_count}  modules={len(bundle.modules)}"
+                + (f" (dropped {len(bundle.dropped_modules)})" if bundle.dropped_modules else "")
+            )
 
         if emit in (EmitMode.per_pr, EmitMode.both):
             if fmt is OutputFormat.md:
@@ -244,12 +263,23 @@ def batch(
                     json.dumps(bundle.json_payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
-            pr_bundles.append((pr_out, bundle.token_count, bundle))
+            report_rows.append({
+                "file": str(pr_out),
+                "tokens": bundle.token_count,
+                "budget": bundle.token_budget,
+                "modules": len(bundle.modules),
+                "jira": jira_note,
+                "over": bundle.token_count > bundle.token_budget,
+                "pr_number": item.pr.number,
+            })
 
     # Combined pass.
     if emit in (EmitMode.combined, EmitMode.both):
         combined = build_combined_prompt(
-            batch_items, token_budget=combined_budget, per_pr_token_budget=budget,
+            batch_items,
+            token_budget=combined_budget,
+            per_pr_token_budget=budget,
+            strict_budget=strict_budget,
         )
         if fmt is OutputFormat.md:
             combined_path = out_dir / combined_name
@@ -260,20 +290,78 @@ def batch(
                 json.dumps(combined.json_payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        typer.echo(
-            f"combined: {combined_path}  tokens={combined.token_count}/{combined.token_budget}"
-            + (
-                f"  dropped {sum(1 for m in combined.dropped_modules if m.startswith('PR #'))} PRs"
-                if any(m.startswith("PR #") for m in combined.dropped_modules)
-                else ""
-            )
+        report_rows.append({
+            "file": str(combined_path) + " (combined)",
+            "tokens": combined.token_count,
+            "budget": combined.token_budget,
+            "modules": len(combined.modules),
+            "jira": f"{matched_with_content}/{len(items)} matched",
+            "over": combined.token_count > combined.token_budget,
+            "pr_number": None,
+        })
+
+    _print_report(report_rows)
+
+    if fmt is OutputFormat.json:
+        sidecar = out_dir / (Path(combined_name).stem + ".report.json")
+        sidecar.write_text(
+            json.dumps(report_rows, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
 
-    if emit in (EmitMode.per_pr, EmitMode.both):
-        typer.echo(
-            f"wrote {len(pr_bundles)} per-PR file(s) to {out_dir} "
-            f"({matched_with_content}/{len(items)} with non-empty Jira data)"
+
+def _truncate_file(path: str, width: int = 60) -> str:
+    if len(path) <= width:
+        return path
+    return "…" + path[-(width - 1):]
+
+
+def _print_report(rows: list[dict[str, object]]) -> None:
+    """Fixed-width report: File | Tokens | Budget | Modules | Jira | Over?."""
+    if not rows:
+        return
+    display_rows: list[dict[str, str]] = []
+    for r in rows:
+        display_rows.append(
+            {
+                "file": _truncate_file(str(r["file"])),
+                "tokens": str(r["tokens"]),
+                "budget": str(r["budget"]),
+                "modules": str(r["modules"]),
+                "jira": str(r["jira"]),
+                "over": "yes" if r["over"] else "",
+            }
         )
+    headers = {
+        "file": "File",
+        "tokens": "Tokens",
+        "budget": "Budget",
+        "modules": "Modules",
+        "jira": "Jira",
+        "over": "Over?",
+    }
+    widths = {
+        k: max(len(headers[k]), *(len(row[k]) for row in display_rows))
+        for k in headers
+    }
+    # File left-aligned; numbers right-aligned; jira/over left-aligned.
+    def _fmt(row: dict[str, str]) -> str:
+        return (
+            f"  {row['file']:<{widths['file']}}"
+            f"  {row['tokens']:>{widths['tokens']}}"
+            f"  {row['budget']:>{widths['budget']}}"
+            f"  {row['modules']:>{widths['modules']}}"
+            f"  {row['jira']:<{widths['jira']}}"
+            f"  {row['over']:<{widths['over']}}"
+        )
+
+    typer.echo("")
+    typer.echo("Report:")
+    typer.echo(_fmt(headers))
+    sep = {k: "-" * widths[k] for k in headers}
+    typer.echo(_fmt(sep))
+    for row in display_rows:
+        typer.echo(_fmt(row))
 
 
 @cache_app.command("list")
@@ -302,7 +390,19 @@ def cache_clear(
     typer.echo(f"cleared {root}")
 
 
+def _strip_duplicate_program_name(argv: list[str]) -> list[str]:
+    """If the user typed `pr-triage pr-triage <sub> …` drop the duplicate and warn."""
+    if len(argv) >= 2 and argv[1] == "pr-triage":
+        typer.echo(
+            "note: ignoring duplicated 'pr-triage' token — did you mean `pr-triage <subcommand>`?",
+            err=True,
+        )
+        return [argv[0], *argv[2:]]
+    return argv
+
+
 def main() -> None:
+    sys.argv = _strip_duplicate_program_name(sys.argv)
     app()
 
 

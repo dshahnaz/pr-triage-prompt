@@ -76,7 +76,26 @@ pr-triage batch ./context --out-dir ./out
 
 For each `pr_*.json` this looks up the matching Jira — first by filename convention (`jira_<jira_id>.json`), then by scanning every `jira_*.json` for a top-level `"key"` that matches. You get one `prompt_<N>.md` per PR **and** one combined `prompt.md` with a single agent-task footer.
 
-Useful flags: `--emit per-pr|combined|both` (default `both`), `--combined-name all.md`, `--token-budget 4000` (per-PR), `--combined-budget 16000`, `--checkout` (sparse-clone each PR to get accurate module names; off by default in batch mode).
+Useful flags: `--emit per-pr|combined|both` (default `both`), `--combined-name all.md`, `--token-budget 4000` (per-PR), `--combined-budget 16000`, `--checkout` (sparse-clone each PR to get accurate module names; off by default in batch mode), `--quiet`/`-q` (skip per-PR progress lines), `--strict-budget` (drop overflowing modules/PRs instead of emitting them — see "Token budget" below).
+
+After the emit loop, `batch` prints a report — one row per written file:
+
+```
+Report:
+  File                                 Tokens  Budget  Modules  Jira         Over?
+  -----------------------------------  ------  ------  -------  -----------  -----
+  out/prompt_23861.md                     513    4000        3  filename          
+  out/prompt_23862.md                    7891    4000        8  content      yes
+  out/prompt.md (combined)              12704   16000       11  2/2 matched
+```
+
+`Over?` is flagged when `tokens > budget`. In `--format json` mode, the same rows land in `out/<combined-name-stem>.report.json` as a list for scripting.
+
+## Token budget
+
+`--token-budget` (per-PR) and `--combined-budget` (combined prompt) are **informational targets** by default — the tool always emits every PR + every module in full, and the report flags any run that exceeded the target. LLM agents still have a finite context window, so the budget is there to tell you *"this prompt is getting big"* — not to silently cut content.
+
+Pass `--strict-budget` (CLI) or `strict_budget=True` (SDK) to restore the old greedy-trim behavior: per-module sections that don't fit collapse to a `_N additional modules omitted for budget: …_` line; in combined mode, PRs that don't fit collapse to `_N additional PRs omitted for budget: …_`. The fixed "Task for the agent" footer is always appended, and the head (title, Jira block, scrubbed PR description, summary table) is always emitted in full regardless of the flag.
 
 ## Input contract
 
