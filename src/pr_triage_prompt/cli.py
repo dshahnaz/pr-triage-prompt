@@ -12,10 +12,11 @@ import typer
 from pr_triage_prompt import __version__
 from pr_triage_prompt.checkout import clear_cache, ensure_checkout, list_cache
 from pr_triage_prompt.config import Config, load_config
+from pr_triage_prompt.io.batch import discover_context
 from pr_triage_prompt.io.jira import fetch_jira_live, load_jira_file
 from pr_triage_prompt.io.pr import fetch_pr_live, load_pr_file, parse_pr_ref
 from pr_triage_prompt.models import JiraTicket, PullRequest
-from pr_triage_prompt.prompt import build_prompt
+from pr_triage_prompt.prompt import BatchItem, build_combined_prompt, build_prompt
 
 app = typer.Typer(
     add_completion=False,
@@ -29,6 +30,12 @@ app.add_typer(cache_app, name="cache")
 class OutputFormat(str, Enum):
     md = "md"
     json = "json"
+
+
+class EmitMode(str, Enum):
+    per_pr = "per-pr"
+    combined = "combined"
+    both = "both"
 
 
 def _version_callback(value: bool) -> None:
@@ -147,6 +154,125 @@ def build(
             f"wrote {out} ({bundle.token_count} tokens / budget {bundle.token_budget}, "
             f"{len(bundle.modules)} module{'s' if len(bundle.modules) != 1 else ''}"
             f"{', ' + str(len(bundle.dropped_modules)) + ' dropped' if bundle.dropped_modules else ''})"
+        )
+
+
+@app.command("batch")
+def batch(
+    context_dir: Path = typer.Argument(
+        ..., exists=True, file_okay=False, dir_okay=True,
+        help="Folder containing pr_*.json and jira_*.json fixtures.",
+    ),
+    out_dir: Path = typer.Option(..., "--out-dir", help="Directory to write prompts into."),
+    emit: EmitMode = typer.Option(
+        EmitMode.both, "--emit", help="What to emit: per-pr, combined, or both.",
+    ),
+    combined_name: str = typer.Option(
+        "prompt.md", "--combined-name", help="Filename for the combined prompt."
+    ),
+    token_budget: int | None = typer.Option(
+        None, "--token-budget", help="Per-PR token budget (default from config)."
+    ),
+    combined_budget: int = typer.Option(
+        16000, "--combined-budget", help="Token budget for the combined prompt."
+    ),
+    skip_checkout: bool = typer.Option(
+        True, "--skip-checkout/--checkout",
+        help="Skip sparse checkout in batch mode (default: skip).",
+    ),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass sparse-checkout cache."),
+    fmt: OutputFormat = typer.Option(OutputFormat.md, "--format", help="Output format."),
+) -> None:
+    """Build prompts from every pr_*.json in a context folder.
+
+    For each PR, looks up its Jira ticket by `jira_<jira_id>.json` (with a content-based
+    fallback on the `key` field). Writes per-PR files and/or one combined prompt.
+    """
+    cfg = load_config()
+    items = discover_context(context_dir)
+    if not items:
+        typer.echo(f"no pr_*.json files in {context_dir}", err=True)
+        raise typer.Exit(1)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    budget = token_budget or cfg.default_token_budget
+
+    def _checkout(pr_repo: str, pr_sha: str, file_paths: list[str]) -> Path | None:
+        if skip_checkout:
+            return None
+        try:
+            return ensure_checkout(
+                cache_root=cfg.resolved_cache_dir(),
+                repo=pr_repo,
+                sha=pr_sha,
+                clone_url=f"https://github.com/{pr_repo}.git",
+                paths=file_paths,
+                no_cache=no_cache,
+            )
+        except Exception as exc:
+            typer.echo(
+                f"warning: checkout failed for {pr_repo}@{pr_sha[:12]} "
+                f"({type(exc).__name__}: {exc}); using degraded resolver",
+                err=True,
+            )
+            return None
+
+    # Per-PR pass.
+    pr_bundles: list[tuple[Path, int, object]] = []
+    batch_items: list[BatchItem] = []
+    matched_with_content = 0
+    for item in items:
+        repo_root = _checkout(item.pr.repo, item.pr.sha, [f.filename for f in item.pr.files])
+        bundle = build_prompt(item.pr, item.jira, repo_root=repo_root, token_budget=budget)
+        batch_items.append(BatchItem(pr=item.pr, jira=item.jira, repo_root=repo_root))
+        jira_note = item.jira_match
+        if item.jira is not None and item.jira.has_content:
+            matched_with_content += 1
+        typer.echo(
+            f"  PR #{item.pr.number}  jira={item.pr.jira_id or '—'}  match={jira_note}  "
+            f"tokens={bundle.token_count}  modules={len(bundle.modules)}"
+            + (f" (dropped {len(bundle.dropped_modules)})" if bundle.dropped_modules else "")
+        )
+
+        if emit in (EmitMode.per_pr, EmitMode.both):
+            if fmt is OutputFormat.md:
+                pr_out = out_dir / f"prompt_{item.pr.number}.md"
+                pr_out.write_text(bundle.markdown, encoding="utf-8")
+            else:
+                pr_out = out_dir / f"prompt_{item.pr.number}.json"
+                pr_out.write_text(
+                    json.dumps(bundle.json_payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            pr_bundles.append((pr_out, bundle.token_count, bundle))
+
+    # Combined pass.
+    if emit in (EmitMode.combined, EmitMode.both):
+        combined = build_combined_prompt(
+            batch_items, token_budget=combined_budget, per_pr_token_budget=budget,
+        )
+        if fmt is OutputFormat.md:
+            combined_path = out_dir / combined_name
+            combined_path.write_text(combined.markdown, encoding="utf-8")
+        else:
+            combined_path = out_dir / (Path(combined_name).stem + ".json")
+            combined_path.write_text(
+                json.dumps(combined.json_payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+        typer.echo(
+            f"combined: {combined_path}  tokens={combined.token_count}/{combined.token_budget}"
+            + (
+                f"  dropped {sum(1 for m in combined.dropped_modules if m.startswith('PR #'))} PRs"
+                if any(m.startswith("PR #") for m in combined.dropped_modules)
+                else ""
+            )
+        )
+
+    if emit in (EmitMode.per_pr, EmitMode.both):
+        typer.echo(
+            f"wrote {len(pr_bundles)} per-PR file(s) to {out_dir} "
+            f"({matched_with_content}/{len(items)} with non-empty Jira data)"
         )
 
 

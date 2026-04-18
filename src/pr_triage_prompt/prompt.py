@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from pr_triage_prompt.analyzers import get_analyzer
@@ -222,28 +223,33 @@ def _analyze_files(pr: PullRequest, repo_root: Path | None) -> list[FileChangeSu
     return summaries
 
 
-def build_prompt(
+def _render_pr_body(
     pr: PullRequest,
-    jira: JiraTicket | None = None,
+    jira: JiraTicket | None,
+    modules: list[ModuleSummary],
     *,
-    repo_root: Path | None = None,
-    token_budget: int = 4000,
-) -> PromptBundle:
-    """Build the Markdown prompt + structured bundle."""
-    file_summaries = _analyze_files(pr, repo_root)
-    modules = _group_files_by_module(file_summaries)
+    token_budget: int,
+    count,
+    include_header_marker: bool = True,
+) -> tuple[str, list[ModuleSummary]]:
+    """Render one PR's markdown block (no agent-task footer).
 
+    If `include_header_marker` is False, the leading `<!-- pr-triage-prompt schema v1 -->`
+    line is omitted — the caller is expected to supply it once at the top of the document.
+    Returns (markdown, dropped_modules).
+    """
     head: list[str] = []
-    head.extend(_format_header(pr))
+    for line in _format_header(pr):
+        if line == SCHEMA_MARKER and not include_header_marker:
+            continue
+        head.append(line)
     head.extend(_format_jira_block(jira))
     head.extend(_format_pr_body(pr))
     head.extend(_format_summary_table(modules))
 
-    count = _token_counter()
     head_text = "\n".join(head)
     head_tokens = count(head_text)
-    footer_tokens = count(AGENT_TASK_FOOTER)
-    remaining = token_budget - head_tokens - footer_tokens
+    remaining = token_budget - head_tokens
 
     rendered_modules: list[str] = []
     dropped: list[ModuleSummary] = []
@@ -261,10 +267,29 @@ def build_prompt(
         body_parts.append("\n".join(rendered_modules).rstrip())
         body_parts.append("")
     body_parts.extend(_format_dropped(dropped))
-    body_parts.append(AGENT_TASK_FOOTER.rstrip())
-    body_parts.append("")
+    return "\n".join(body_parts).rstrip() + "\n", dropped
 
-    markdown = "\n".join(body_parts)
+
+def build_prompt(
+    pr: PullRequest,
+    jira: JiraTicket | None = None,
+    *,
+    repo_root: Path | None = None,
+    token_budget: int = 4000,
+) -> PromptBundle:
+    """Build the Markdown prompt + structured bundle."""
+    file_summaries = _analyze_files(pr, repo_root)
+    modules = _group_files_by_module(file_summaries)
+
+    count = _token_counter()
+    footer_tokens = count(AGENT_TASK_FOOTER)
+    body_md, dropped = _render_pr_body(
+        pr, jira, modules,
+        token_budget=token_budget - footer_tokens,
+        count=count,
+    )
+
+    markdown = body_md + "\n" + AGENT_TASK_FOOTER.rstrip() + "\n"
     token_count = count(markdown)
 
     return PromptBundle(
@@ -272,6 +297,101 @@ def build_prompt(
         modules=modules,
         files=file_summaries,
         dropped_modules=[m.module_name for m in dropped],
+        token_count=token_count,
+        token_budget=token_budget,
+    )
+
+
+@dataclass
+class BatchItem:
+    """One PR+Jira pair passed to `build_combined_prompt`."""
+
+    pr: PullRequest
+    jira: JiraTicket | None = None
+    repo_root: Path | None = None
+
+
+def build_combined_prompt(
+    items: list[BatchItem],
+    *,
+    token_budget: int = 16000,
+    per_pr_token_budget: int = 4000,
+) -> PromptBundle:
+    """Build one combined prompt covering many PRs with a single agent-task footer.
+
+    Greedy-fill: each PR gets up to `per_pr_token_budget` tokens. PRs that don't fit
+    the remaining `token_budget` are replaced with a one-line "N additional PRs omitted"
+    notice.
+    """
+    count = _token_counter()
+    footer_tokens = count(AGENT_TASK_FOOTER)
+    header_parts = [
+        SCHEMA_MARKER,
+        "",
+        f"# Batch prompt — {len(items)} PR{'s' if len(items) != 1 else ''}",
+        "",
+    ]
+    repos = sorted({it.pr.repo for it in items if it.pr.repo})
+    if repos:
+        header_parts.append("**Repos:** " + ", ".join(repos))
+        header_parts.append("")
+    header_md = "\n".join(header_parts)
+    header_tokens = count(header_md)
+
+    remaining = token_budget - header_tokens - footer_tokens
+    rendered: list[str] = []
+    all_files: list[FileChangeSummary] = []
+    all_modules: list[ModuleSummary] = []
+    dropped_prs: list[tuple[int, str | None]] = []
+    total_dropped_modules: list[str] = []
+
+    for item in items:
+        file_summaries = _analyze_files(item.pr, item.repo_root)
+        modules = _group_files_by_module(file_summaries)
+        body_md, dropped_modules = _render_pr_body(
+            item.pr, item.jira, modules,
+            token_budget=per_pr_token_budget,
+            count=count,
+            include_header_marker=False,
+        )
+        body_md = "---\n\n" + body_md
+        block_tokens = count(body_md)
+        if block_tokens <= remaining:
+            rendered.append(body_md)
+            remaining -= block_tokens
+            all_files.extend(file_summaries)
+            all_modules.extend(modules)
+            total_dropped_modules.extend(m.module_name for m in dropped_modules)
+        else:
+            dropped_prs.append((item.pr.number, item.pr.jira_id))
+
+    omitted_line = ""
+    if dropped_prs:
+        parts = [f"#{n}" + (f" ({j})" if j else "") for n, j in dropped_prs]
+        omitted_line = (
+            f"\n---\n\n_{len(dropped_prs)} additional PR"
+            f"{'s' if len(dropped_prs) != 1 else ''} omitted for budget: "
+            f"{', '.join(parts)}_\n"
+        )
+
+    parts = [header_md.rstrip(), ""]
+    if rendered:
+        parts.append("\n".join(rendered).rstrip())
+        parts.append("")
+    if omitted_line:
+        parts.append(omitted_line.rstrip())
+        parts.append("")
+    parts.append(AGENT_TASK_FOOTER.rstrip())
+    parts.append("")
+
+    markdown = "\n".join(parts)
+    token_count = count(markdown)
+
+    return PromptBundle(
+        markdown=markdown,
+        modules=all_modules,
+        files=all_files,
+        dropped_modules=[f"PR #{n}" for n, _ in dropped_prs] + total_dropped_modules,
         token_count=token_count,
         token_budget=token_budget,
     )

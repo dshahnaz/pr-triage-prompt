@@ -66,6 +66,18 @@ pr-triage build vcf/mops#23861 --out out/prompt_23861.md
 
 Output is a Markdown file with: PR header, Jira block, scrubbed PR description, a per-module changes table, per-file symbol lists, and a fixed "Task for the agent" footer. Paste it into your test-suite-bound agent.
 
+### Batch a whole context folder
+
+Have a directory of `pr_*.json` + `jira_*.json` fixtures? Process them all in one shot:
+
+```bash
+pr-triage batch ./context --out-dir ./out
+```
+
+For each `pr_*.json` this looks up the matching Jira — first by filename convention (`jira_<jira_id>.json`), then by scanning every `jira_*.json` for a top-level `"key"` that matches. You get one `prompt_<N>.md` per PR **and** one combined `prompt.md` with a single agent-task footer.
+
+Useful flags: `--emit per-pr|combined|both` (default `both`), `--combined-name all.md`, `--token-budget 4000` (per-PR), `--combined-budget 16000`, `--checkout` (sparse-clone each PR to get accurate module names; off by default in batch mode).
+
 ## Input contract
 
 The PR JSON shape matches what `gh api repos/OWNER/REPO/pulls/N` and `.../files` return, merged:
