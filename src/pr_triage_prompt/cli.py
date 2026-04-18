@@ -484,15 +484,16 @@ def _print_report(
 
 @cache_app.command("list")
 def cache_list() -> None:
-    """List cached (repo, sha) checkouts."""
+    """List cached per-repo clones."""
     cfg = load_config()
     entries = list_cache(cfg.resolved_cache_dir())
     if not entries:
         typer.echo(f"(empty) {cfg.resolved_cache_dir()}")
         return
     for e in entries:
-        size_kb = e.size_bytes / 1024
-        typer.echo(f"{e.repo} @ {e.sha}  {size_kb:,.0f} KiB  {e.path}")
+        size_mb = e.size_bytes / (1024 * 1024)
+        sha = (e.last_sha[:12] + "…") if e.last_sha else "(never checked out)"
+        typer.echo(f"{e.repo}  HEAD={sha}  {size_mb:,.1f} MiB  {e.path}")
 
 
 @cache_app.command("clear")

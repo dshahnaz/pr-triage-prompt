@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. Format loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-04-18
+
+### Changed (performance)
+- **One clone per repo, not per SHA.** The cache is now keyed by `<repo-slug>` (e.g. `vcf__mops/`) instead of `<repo-slug>/<sha>/`. Subsequent PRs on the same repo reuse the existing partial clone and just switch SHAs in place — fetching the new commit lazily, flipping the sparse set, then `git checkout <sha>`. A 10-PR batch against the same repo goes from 10 full clones (minutes, GBs) down to **one metadata clone + 10 lazy SHA fetches** (seconds, MBs).
+- **Sparse patterns are exact files only.** Previously the tool added every parent directory (`ops/`, `ops/tests/`, …) to the sparse-checkout set. With `--no-cone` sparse-checkout, a bare directory pattern is gitignore-style recursive — so `ops/` pulled *every blob under ops*. That's why the first checkout was ~600 MB. Fix: list only the exact file paths (and the build descriptors the module resolver wants). Working-tree size drops by orders of magnitude.
+- **Legacy cache layout (v0.5 and earlier) is auto-cleaned on first run.** If v0.6.0 finds old `<repo-slug>/<sha>/` directories, it removes them before setting up the new per-repo clone. No manual `pr-triage cache clear` needed.
+- **`pr-triage cache list` output** now shows one row per repo with the currently-checked-out SHA and total size, instead of one row per (repo, sha) pair.
+
+### Added
+- Checkout phases include a new `reuse` event (`reusing <repo> clone`) and `fetch` event (`fetching <sha> (lazy blob fetch)`) so you can see cache effectiveness at a glance.
+- `migrate` phase event (`removed N legacy per-SHA dirs`) on the first v0.6.0 run against a v0.5 cache.
+
+### Known limitation
+- **Not safe to run two `pr-triage batch` jobs against the same repo concurrently.** The working tree is shared; parallel runs on different repos are fine. A file-based lock would be straightforward — raise an issue if you need it.
+
 ## [0.5.0] — 2026-04-18
 
 ### Changed
@@ -79,6 +94,7 @@ Initial release.
 - SDK: `build_prompt(pr, jira, *, repo_cache_dir, token_budget) -> PromptBundle`.
 - Golden test against `examples/pr_23861.json` → `examples/prompt_23861.md` (byte-exact).
 
+[0.6.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.6.0
 [0.5.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.5.0
 [0.4.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.4.0
 [0.3.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.3.0
