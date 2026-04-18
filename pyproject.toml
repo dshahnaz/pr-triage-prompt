@@ -1,0 +1,66 @@
+[project]
+name = "pr-triage-prompt"
+version = "0.1.0"
+description = "Turn a GitHub PR + Jira ticket into a Markdown prompt file for a test-suite-bound LLM agent"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "dshahnaz" }]
+keywords = ["pr", "triage", "prompt", "github", "jira", "code-review", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "typer>=0.12",
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "tokenizers>=0.15",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+treesitter = [
+    "tree-sitter>=0.21",
+    "tree-sitter-java>=0.21",
+    "tree-sitter-python>=0.21",
+    "tree-sitter-typescript>=0.21",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-httpx>=0.30",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+pr-triage = "pr_triage_prompt.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pr_triage_prompt"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/pr_triage_prompt/cli.py" = ["B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtualenvs / uv
+.venv/
+venv/
+.env
+.python-version
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# uv lock is committed, but per-machine caches are not
+uv.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Generated output
+out/
+/tmp-prompt-*.md
