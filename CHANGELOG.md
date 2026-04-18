@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here. Format loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-04-18
+
+### Changed
+- **Output streams cleanly split.** The report table is the only thing on stdout; all progress, notes, warnings, and errors go to stderr. Piping `--format json` and redirecting stderr now both work without munging.
+- **Per-PR progress is phased.** Replaces the old single-line `PR #… jira=… tokens=…` with an indexed header + aligned sub-lines (`checkout`, `jira`, `wrote`).
+- **Report paths are relative to `--out-dir` by default** (`prompt_23861.md` instead of a long absolute path). Use `--report-paths abs` to restore the old format. The combined row's `(combined)` filename suffix is gone; a new `Kind` column marks it.
+- **`GIT_TERMINAL_PROMPT=0`** is now set for every git invocation so a missing credential fails fast with a real error instead of hanging on an interactive prompt.
+
+### Added
+- **Git authentication for HTTPS clones.** When `clone_url_template` points at `github.com` and `GITHUB_TOKEN` is set, the tool now injects an `Authorization: Bearer` header into the git invocation via `git -c http.https://github.com/.extraheader=…`. No token ends up in disk state or URL munging. For non-GitHub hosts, set `git_token_env` in `~/.pr-triage/config.toml` to name the env var. SSH URLs are untouched (continue to use your agent).
+- **`--verbose` / `-v`** on `build` + `batch`: prints each git subcommand (tokens redacted to `Bearer ***`) and other detail.
+- **`--no-color`** on `build` + `batch` (plus standard `NO_COLOR` env var): disables color regardless of TTY state.
+- **`--report-paths abs|rel`** on `batch`: default `rel`.
+- New `src/pr_triage_prompt/log.py` module with `info / note / warn / error / progress / phase / verbose` helpers, TTY detection, and `--quiet` / `--verbose` / `--no-color` state.
+- The startup banner (`pr-triage 0.5.0  ·  N PRs in <ctx>  →  <out>`) makes it obvious what's about to run.
+
+### Migration
+- `--skip-checkout` was already removed in 0.4.0; no new flag removals.
+- Scripts that scrape the old per-PR progress line (`  PR #… jira=…`) should instead parse the JSON report sidecar (`--format json` → `<combined-stem>.report.json`) or the report table on stdout.
+
 ## [0.4.0] — 2026-04-18
 
 ### Changed (breaking)
@@ -59,6 +79,7 @@ Initial release.
 - SDK: `build_prompt(pr, jira, *, repo_cache_dir, token_budget) -> PromptBundle`.
 - Golden test against `examples/pr_23861.json` → `examples/prompt_23861.md` (byte-exact).
 
+[0.5.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.5.0
 [0.4.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.4.0
 [0.3.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.3.0
 [0.2.0]: https://github.com/dshahnaz/pr-triage-prompt/releases/tag/v0.2.0

@@ -29,6 +29,9 @@ class Config:
     clone_url_template: str | None = None
     """Git URL template for sparse checkout. `{repo}` is substituted with the PR's
     `<owner>/<repo>` slug. No built-in default — cloning is skipped unless this is set."""
+    git_token_env: str | None = None
+    """Env var to read for HTTPS-clone authentication against non-github.com hosts.
+    For github.com, ``github_token_env`` is used automatically."""
 
     def resolved_clone_url(self, repo: str) -> str | None:
         if not self.clone_url_template:
@@ -43,6 +46,22 @@ class Config:
 
     def jira_token(self) -> str | None:
         return os.environ.get(self.jira_token_env)
+
+    def git_token_for(self, clone_url: str) -> str | None:
+        """Pick the right env var for this clone URL. ``github.com`` uses
+        ``github_token_env``; other HTTPS hosts use ``git_token_env`` if configured.
+        SSH and file:// URLs → None (authentication handled elsewhere)."""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(clone_url)
+        if parsed.scheme not in ("http", "https"):
+            return None
+        host = (parsed.hostname or "").lower()
+        if host == "github.com":
+            return self.github_token()
+        if self.git_token_env:
+            return os.environ.get(self.git_token_env)
+        return None
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -70,6 +89,8 @@ def load_config(path: Path | None = None) -> Config:
         cfg.default_token_budget = data["default_token_budget"]
     if isinstance(data.get("clone_url_template"), str):
         cfg.clone_url_template = data["clone_url_template"]
+    if isinstance(data.get("git_token_env"), str):
+        cfg.git_token_env = data["git_token_env"]
     return cfg
 
 

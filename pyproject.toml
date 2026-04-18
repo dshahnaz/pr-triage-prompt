@@ -1,6 +1,6 @@
 [project]
 name = "pr-triage-prompt"
-version = "0.4.0"
+version = "0.5.0"
 description = "Turn a GitHub PR + Jira ticket into a Markdown prompt file for a test-suite-bound LLM agent"
 readme = "README.md"
 requires-python = ">=3.10"

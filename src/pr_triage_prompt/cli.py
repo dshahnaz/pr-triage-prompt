@@ -9,7 +9,7 @@ from pathlib import Path
 
 import typer
 
-from pr_triage_prompt import __version__
+from pr_triage_prompt import __version__, log
 from pr_triage_prompt.checkout import clear_cache, ensure_checkout, list_cache
 from pr_triage_prompt.config import Config, load_config
 from pr_triage_prompt.io.batch import discover_context
@@ -36,6 +36,18 @@ class EmitMode(str, Enum):
     per_pr = "per-pr"
     combined = "combined"
     both = "both"
+
+
+class ReportPaths(str, Enum):
+    rel = "rel"
+    abs = "abs"
+
+
+def _apply_log_flags(quiet: bool, verbose: bool, no_color: bool) -> None:
+    log.set_quiet(quiet)
+    log.set_verbose(verbose)
+    if no_color:
+        log.set_color(False)
 
 
 def _version_callback(value: bool) -> None:
@@ -78,25 +90,26 @@ def _load_pr(pr_ref: str, cfg: Config) -> PullRequest:
     return fetch_pr_live(parsed.owner_repo, parsed.number, token)
 
 
-_CHECKOUT_WARNED_NO_URL = False
-
-
 def _maybe_checkout(
     cfg: Config, pr_repo: str, pr_sha: str, file_paths: list[str], no_cache: bool
 ) -> tuple[Path | None, str]:
-    """Return (repo_root, status) where status is 'yes' | 'no' | 'fail'."""
-    global _CHECKOUT_WARNED_NO_URL
+    """Return (repo_root, status) where status is 'yes' | 'no' | 'fail'.
+
+    Progress is routed through ``log.phase("checkout", …)``; git auth is injected
+    automatically from the configured token env var (see ``Config.git_token_for``).
+    """
     clone_url = cfg.resolved_clone_url(pr_repo)
     if clone_url is None:
-        if not _CHECKOUT_WARNED_NO_URL:
-            typer.echo(
-                "note: no clone_url_template configured; proceeding without a source checkout "
-                "(module names + modified-function detection degraded). Set `clone_url_template` "
-                "in ~/.pr-triage/config.toml or pass --clone-url.",
-                err=True,
-            )
-            _CHECKOUT_WARNED_NO_URL = True
+        log.phase("checkout", "skipped (no clone_url_template set)")
         return None, "no"
+
+    def _on_phase(event: str, msg: str) -> None:
+        log.phase("checkout", msg)
+
+    def _verbose_cmd(cmd: list[str]) -> None:
+        log.verbose("$ " + " ".join(cmd))
+
+    token = cfg.git_token_for(clone_url)
     try:
         repo_root = ensure_checkout(
             cache_root=cfg.resolved_cache_dir(),
@@ -105,13 +118,18 @@ def _maybe_checkout(
             clone_url=clone_url,
             paths=file_paths,
             no_cache=no_cache,
+            git_token=token,
+            on_phase=_on_phase,
+            verbose_cmd=_verbose_cmd,
         )
         return repo_root, "yes"
     except Exception as exc:
-        typer.echo(
-            f"warning: sparse checkout failed for {pr_repo}@{pr_sha[:12]} "
-            f"({type(exc).__name__}: {exc}); using degraded resolver",
-            err=True,
+        stderr_tail = ""
+        if hasattr(exc, "stderr") and exc.stderr:  # CalledProcessError
+            stderr_tail = " :: " + str(exc.stderr).strip().splitlines()[-1][:200]
+        log.warn(
+            f"sparse checkout failed for {pr_repo}@{pr_sha[:12]} "
+            f"({type(exc).__name__}){stderr_tail}"
         )
         return None, "fail"
 
@@ -158,11 +176,19 @@ def build(
         help="Git URL template (with `{repo}`) for the sparse checkout. "
         "Overrides `clone_url_template` in ~/.pr-triage/config.toml.",
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print git commands + per-file analyzer timings."),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colored output."),
 ) -> None:
     """Build a Markdown prompt from a PR (+ Jira ticket)."""
+    _apply_log_flags(quiet=False, verbose=verbose, no_color=no_color)
     cfg = load_config()
     if clone_url:
         cfg.clone_url_template = clone_url
+    if cfg.clone_url_template is None:
+        log.note(
+            "no clone_url_template set in ~/.pr-triage/config.toml; sparse checkouts are skipped "
+            "(module names + modified-function detection degraded)."
+        )
     pr = _load_pr(pr_ref, cfg)
     jira = _load_jira(jira_file, jira_key, cfg, pr.jira_id)
 
@@ -183,10 +209,13 @@ def build(
     else:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(payload, encoding="utf-8")
-        typer.echo(
-            f"wrote {out} ({bundle.token_count} tokens / budget {bundle.token_budget}, "
-            f"{len(bundle.modules)} module{'s' if len(bundle.modules) != 1 else ''}"
-            f"{', ' + str(len(bundle.dropped_modules)) + ' dropped' if bundle.dropped_modules else ''})"
+        dropped_note = (
+            f" · {len(bundle.dropped_modules)} dropped" if bundle.dropped_modules else ""
+        )
+        modules_word = "module" if len(bundle.modules) == 1 else "modules"
+        log.info(
+            f"wrote {out}  —  {bundle.token_count} tokens / "
+            f"budget {bundle.token_budget} · {len(bundle.modules)} {modules_word}{dropped_note}"
         )
 
 
@@ -225,46 +254,72 @@ def batch(
     quiet: bool = typer.Option(
         False, "--quiet", "-q", help="Suppress per-PR progress lines; always prints the final report."
     ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print git commands + per-file analyzer timings."),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colored output."),
+    report_paths: ReportPaths = typer.Option(
+        ReportPaths.rel, "--report-paths",
+        help="Show paths in the report as rel (relative to --out-dir) or abs.",
+    ),
 ) -> None:
     """Build prompts from every pr_*.json in a context folder.
 
     For each PR, looks up its Jira ticket by `jira_<jira_id>.json` (with a content-based
     fallback on the `key` field). Writes per-PR files and/or one combined prompt.
     """
+    _apply_log_flags(quiet=quiet, verbose=verbose, no_color=no_color)
     cfg = load_config()
     if clone_url:
         cfg.clone_url_template = clone_url
     items = discover_context(context_dir)
     if not items:
-        typer.echo(f"no pr_*.json files in {context_dir}", err=True)
+        log.error(f"no pr_*.json files in {context_dir}")
         raise typer.Exit(1)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     budget = token_budget or cfg.default_token_budget
 
+    log.info(
+        f"pr-triage {__version__}  ·  {len(items)} PR{'s' if len(items) != 1 else ''} "
+        f"in {context_dir}  →  {out_dir}"
+    )
+    if cfg.clone_url_template is None:
+        log.note(
+            "no clone_url_template set in ~/.pr-triage/config.toml; sparse checkouts are skipped "
+            "(module names + modified-function detection degraded)."
+        )
+
     # Per-PR pass.
     report_rows: list[dict[str, object]] = []
     batch_items: list[BatchItem] = []
     matched_with_content = 0
-    for item in items:
+    total = len(items)
+    for idx, item in enumerate(items, start=1):
+        title = item.pr.title
+        if len(title) > 70:
+            title = title[:67] + "…"
+        log.progress(f"[{idx}/{total}] PR #{item.pr.number}  {item.pr.repo}  \"{title}\"")
+
         repo_root, checkout_status = _maybe_checkout(
             cfg, item.pr.repo, item.pr.sha, [f.filename for f in item.pr.files], no_cache
         )
+        jira_note = item.jira_match
+        if item.jira is not None and item.jira.has_content:
+            matched_with_content += 1
+        if item.pr.jira_id:
+            if jira_note == "filename":
+                log.phase("jira", f"{item.pr.jira_id} → jira_{item.pr.jira_id}.json (filename match)")
+            elif jira_note == "content":
+                log.phase("jira", f"{item.pr.jira_id} → matched by top-level `key` in another jira_*.json")
+            else:
+                log.phase("jira", f"{item.pr.jira_id} — no matching jira_*.json in context")
+        else:
+            log.phase("jira", "no Jira ID in PR")
+
         bundle = build_prompt(
             item.pr, item.jira,
             repo_root=repo_root, token_budget=budget, strict_budget=strict_budget,
         )
         batch_items.append(BatchItem(pr=item.pr, jira=item.jira, repo_root=repo_root))
-        jira_note = item.jira_match
-        if item.jira is not None and item.jira.has_content:
-            matched_with_content += 1
-        if not quiet:
-            typer.echo(
-                f"  PR #{item.pr.number}  jira={item.pr.jira_id or '—'}  match={jira_note}  "
-                f"tokens={bundle.token_count}  modules={len(bundle.modules)}  "
-                f"checkout={checkout_status}"
-                + (f" (dropped {len(bundle.dropped_modules)})" if bundle.dropped_modules else "")
-            )
 
         if emit in (EmitMode.per_pr, EmitMode.both):
             if fmt is OutputFormat.md:
@@ -276,8 +331,20 @@ def batch(
                     json.dumps(bundle.json_payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
                 )
+            modules_word = "module" if len(bundle.modules) == 1 else "modules"
+            files_word = "file" if len(item.pr.files) == 1 else "files"
+            dropped_tag = (
+                f" · {len(bundle.dropped_modules)} dropped" if bundle.dropped_modules else ""
+            )
+            log.phase(
+                "wrote",
+                f"{pr_out.name}  —  {bundle.token_count} tokens · "
+                f"{len(bundle.modules)} {modules_word} · {len(item.pr.files)} {files_word}"
+                f"{dropped_tag}",
+            )
             report_rows.append({
                 "file": str(pr_out),
+                "kind": "per-pr",
                 "tokens": bundle.token_count,
                 "budget": bundle.token_budget,
                 "modules": len(bundle.modules),
@@ -305,8 +372,15 @@ def batch(
                 json.dumps(combined.json_payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
+        dropped_prs = sum(1 for m in combined.dropped_modules if m.startswith("PR #"))
+        log.progress(
+            f"combined: {combined_path.name}  —  {combined.token_count} tokens / "
+            f"budget {combined.token_budget}"
+            + (f" · {dropped_prs} PRs dropped" if dropped_prs else "")
+        )
         report_rows.append({
-            "file": str(combined_path) + " (combined)",
+            "file": str(combined_path),
+            "kind": "combined",
             "tokens": combined.token_count,
             "budget": combined.token_budget,
             "modules": len(combined.modules),
@@ -317,7 +391,7 @@ def batch(
             "pr_number": None,
         })
 
-    _print_report(report_rows)
+    _print_report(report_rows, out_dir=out_dir, relative=(report_paths is ReportPaths.rel))
 
     if fmt is OutputFormat.json:
         sidecar = out_dir / (Path(combined_name).stem + ".report.json")
@@ -333,15 +407,34 @@ def _truncate_file(path: str, width: int = 60) -> str:
     return "…" + path[-(width - 1):]
 
 
-def _print_report(rows: list[dict[str, object]]) -> None:
-    """Fixed-width report: File | Tokens | Budget | Files | Modules | Checkout | Jira | Over?."""
+def _render_path(raw: str, out_dir: Path, relative: bool) -> str:
+    if not relative:
+        return _truncate_file(raw)
+    # Resolve both sides so symlinks like /tmp → /private/tmp don't block the match.
+    try:
+        raw_resolved = Path(raw).resolve()
+        base_resolved = out_dir.resolve()
+        rel = raw_resolved.relative_to(base_resolved)
+        return str(rel)
+    except (ValueError, OSError):
+        return _truncate_file(raw)
+
+
+def _print_report(
+    rows: list[dict[str, object]],
+    *,
+    out_dir: Path,
+    relative: bool,
+) -> None:
+    """Fixed-width report (stdout): Prompt | Kind | Tokens | Budget | Files | Modules | Checkout | Jira | Over?."""
     if not rows:
         return
     display_rows: list[dict[str, str]] = []
     for r in rows:
         display_rows.append(
             {
-                "file": _truncate_file(str(r["file"])),
+                "file": _render_path(str(r["file"]), out_dir, relative),
+                "kind": str(r.get("kind", "")),
                 "tokens": str(r["tokens"]),
                 "budget": str(r["budget"]),
                 "files": str(r.get("files", "")),
@@ -352,7 +445,8 @@ def _print_report(rows: list[dict[str, object]]) -> None:
             }
         )
     headers = {
-        "file": "File",
+        "file": "Prompt",
+        "kind": "Kind",
         "tokens": "Tokens",
         "budget": "Budget",
         "files": "Files",
@@ -369,6 +463,7 @@ def _print_report(rows: list[dict[str, object]]) -> None:
     def _fmt(row: dict[str, str]) -> str:
         return (
             f"  {row['file']:<{widths['file']}}"
+            f"  {row['kind']:<{widths['kind']}}"
             f"  {row['tokens']:>{widths['tokens']}}"
             f"  {row['budget']:>{widths['budget']}}"
             f"  {row['files']:>{widths['files']}}"
@@ -378,13 +473,13 @@ def _print_report(rows: list[dict[str, object]]) -> None:
             f"  {row['over']:<{widths['over']}}"
         )
 
-    typer.echo("")
-    typer.echo("Report:")
-    typer.echo(_fmt(headers))
+    print("", flush=True)
+    print("Report:")
+    print(_fmt(headers))
     sep = {k: "-" * widths[k] for k in headers}
-    typer.echo(_fmt(sep))
+    print(_fmt(sep))
     for row in display_rows:
-        typer.echo(_fmt(row))
+        print(_fmt(row))
 
 
 @cache_app.command("list")

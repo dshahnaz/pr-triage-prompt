@@ -152,6 +152,27 @@ detection are reduced. With it set, the sparse checkout is cached by `(repo, sha
 `~/.cache/pr-triage/`, so the first batch run does the network work and every subsequent
 run is instant.
 
+### HTTPS authentication
+
+When `clone_url_template` points at `github.com` and `GITHUB_TOKEN` is exported,
+`pr-triage` injects an `Authorization: Bearer` header into the git invocation via
+`git -c http.https://github.com/.extraheader=…` — no credential prompt, no token
+written anywhere on disk, and `--verbose` prints the git command with the token
+redacted to `Bearer ***`.
+
+For internal Git hosts (GitHub Enterprise, GitLab, Bitbucket), add a line to
+`~/.pr-triage/config.toml`:
+
+```toml
+git_token_env = "GHE_TOKEN"   # name of the env var holding the bearer token
+```
+
+SSH clone URLs (`git@host:owner/repo.git`) continue to use your SSH agent — no
+header is injected.
+
+All git invocations run with `GIT_TERMINAL_PROMPT=0` so a misconfigured
+credential fails fast with a real error instead of hanging on a prompt.
+
 Resolution order: env var → CLI flag → config file → default. Tokens are read from env only; never echoed.
 
 ## Cache

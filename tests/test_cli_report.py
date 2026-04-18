@@ -49,7 +49,9 @@ def test_report_printed_with_tokens_and_budget(tmp_path: Path) -> None:
     assert "Over?" in r.stdout
     # The per-PR file row and the combined row should both appear.
     assert "prompt_1.md" in r.stdout
-    assert "prompt.md (combined)" in r.stdout
+    # Combined row shown as a separate `Kind` column now, not appended to the filename.
+    assert "combined" in r.stdout
+    assert "Kind" in r.stdout
 
 
 def test_quiet_suppresses_per_pr_lines_but_keeps_report(tmp_path: Path) -> None:
@@ -59,8 +61,13 @@ def test_quiet_suppresses_per_pr_lines_but_keeps_report(tmp_path: Path) -> None:
     out = tmp_path / "out"
     r = _run("batch", str(ctx), "--out-dir", str(out), "--quiet")
     assert r.returncode == 0, r.stderr
-    # Progress line format starts with "  PR #"
-    assert "  PR #" not in r.stdout
+    # Progress now lives on stderr; in --quiet the per-PR header + phase lines are gone.
+    assert "PR #1" not in r.stderr
+    # (The banner note about clone_url_template still mentions "checkouts" — that's fine;
+    # --quiet suppresses progress, not the background note.)
+    assert "[1/" not in r.stderr
+    assert "    checkout " not in r.stderr  # indented phase label with trailing space
+    # The report still goes to stdout.
     assert "Report:" in r.stdout
 
 

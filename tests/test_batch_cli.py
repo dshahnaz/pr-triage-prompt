@@ -49,8 +49,11 @@ def test_batch_emits_per_pr_and_combined(tmp_path: Path) -> None:
     out = tmp_path / "out"
     res = _run_cli("batch", str(ctx), "--out-dir", str(out), cwd=REPO_ROOT)
     assert res.returncode == 0, res.stderr
-    assert "match=filename" in res.stdout
-    assert "match=content" in res.stdout
+    # Phased progress now lives on stderr; the report's Jira column uses the match reason.
+    assert "filename match" in res.stderr
+    assert "matched by top-level `key`" in res.stderr
+    assert "filename" in res.stdout
+    assert "content" in res.stdout
 
     assert (out / "prompt_1.md").is_file()
     assert (out / "prompt_2.md").is_file()
